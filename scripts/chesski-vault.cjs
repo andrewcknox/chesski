@@ -27,7 +27,28 @@ function readVault() {
 
 function writeVault(vault) {
   fs.mkdirSync(VAULT_DIR, { recursive: true });
-  const next = { ...emptyVault(), ...vault, version: 1 };
+  const existing = readVault();
+  const incomingAccounts = Array.isArray(vault.accounts) ? vault.accounts : [];
+  const incomingRecoverySnapshots = Array.isArray(vault.recoverySnapshots) ? vault.recoverySnapshots : [];
+  const accounts = incomingAccounts.length > 0 || existing.accounts.length === 0
+    ? incomingAccounts
+    : existing.accounts;
+  const recoverySnapshots = incomingRecoverySnapshots.length > 0 || existing.recoverySnapshots.length === 0
+    ? incomingRecoverySnapshots
+    : existing.recoverySnapshots;
+  const next = {
+    ...emptyVault(),
+    ...existing,
+    ...vault,
+    accounts,
+    recoverySnapshots,
+    currentAccountId: incomingAccounts.length > 0
+      ? (typeof vault.currentAccountId === 'string' ? vault.currentAccountId : null)
+      : accounts.length === 0
+        ? null
+        : existing.currentAccountId,
+    version: 1,
+  };
   const tmp = `${VAULT_PATH}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
   fs.renameSync(tmp, VAULT_PATH);

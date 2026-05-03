@@ -102,16 +102,25 @@ export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
     }, 'Restored rescue snapshot.');
   }
 
+  async function handleTokenSaved() {
+    setShowTokenManage(false);
+    try {
+      await syncCurrentAccount();
+      setStatus('Token saved to account.');
+      setError(null);
+    } catch {
+      setStatus(null);
+    }
+    onTokenChanged();
+    await reload();
+  }
+
   return (
     <div className="layout account-layout">
       {showTokenManage && (
         <TokenModal
           manage
-          onSaved={() => {
-            setShowTokenManage(false);
-            onTokenChanged();
-            void reload();
-          }}
+          onSaved={() => { void handleTokenSaved(); }}
           onCancel={() => setShowTokenManage(false)}
         />
       )}

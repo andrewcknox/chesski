@@ -216,19 +216,36 @@ export async function createAccount(username: string, password: string): Promise
 
 export async function signIn(username: string, password: string): Promise<AccountSummary> {
   const clean = normalizeUsername(username);
-  const accounts = await getAccounts();
+  const vault = await getVault();
+  const accounts = vault.accounts as LocalAccount[];
   const idx = accounts.findIndex(a => normalizeUsername(a.username) === clean);
   if (idx === -1) throw new Error('No account with that username is saved on this computer.');
   const account = accounts[idx];
   if ((await hashPassword(password, account.passwordSalt)) !== account.passwordHash) throw new Error('That password did not match.');
-  const updated = { ...account, lastSignedInAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const now = new Date().toISOString();
+  const fallbackToken = account.snapshot?.lichessToken ?? vault.lichessToken ?? null;
+  let repairedSnapshot = account.snapshot && !account.snapshot.lichessToken && fallbackToken
+    ? { ...account.snapshot, lichessToken: fallbackToken, exportedAt: now }
+    : account.snapshot;
+  if (!repairedSnapshot && fallbackToken) {
+    await setLichessToken(fallbackToken);
+    repairedSnapshot = await currentAccountSnapshot(now);
+  }
+  const updated = {
+    ...account,
+    snapshot: repairedSnapshot,
+    lastSignedInAt: now,
+    lastSyncedAt: repairedSnapshot !== account.snapshot ? now : account.lastSyncedAt,
+    updatedAt: now,
+  };
   accounts[idx] = updated;
-  await setAccounts(accounts);
-  await setCurrentAccountId(updated.id);
+  await setVault({ ...vault, accounts, currentAccountId: updated.id, lichessToken: fallbackToken });
   if (updated.snapshot) {
     await importAll(updated.snapshot.data, 'replace');
-    await setLichessToken(updated.snapshot.lichessToken);
+    await setLichessToken(updated.snapshot.lichessToken ?? fallbackToken);
     await saveHistoryProgress(updated.snapshot.historyProgress);
+  } else if (fallbackToken) {
+    await setLichessToken(fallbackToken);
   }
   return accountSummary(updated);
 }
