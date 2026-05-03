@@ -68,11 +68,11 @@ export function AccountMode({ onRestored }: AccountModeProps) {
   }
 
   async function handleSync() {
-    await run(syncCurrentAccount, 'Saved the latest token, repertoire, and history-card progress to this account.');
+    await run(syncCurrentAccount, 'Saved the latest token, repertoire, and trivia-card progress to this account.');
   }
 
   async function handleRestore() {
-    if (!window.confirm('Restore this account snapshot? This replaces the current local repertoire and history-card progress.')) return;
+    if (!window.confirm('Restore this account snapshot? This replaces the current local repertoire and trivia-card progress.')) return;
     await run(async () => {
       await restoreCurrentAccount();
       onRestored();
@@ -84,7 +84,7 @@ export function AccountMode({ onRestored }: AccountModeProps) {
   }
 
   async function handleRecoveryRestore(id: string) {
-    if (!window.confirm('Restore this rescue snapshot? This replaces the current local repertoire and history-card progress.')) return;
+    if (!window.confirm('Restore this rescue snapshot? This replaces the current local repertoire and trivia-card progress.')) return;
     await run(async () => {
       await restoreRecoverySnapshot(id);
       onRestored();
@@ -156,7 +156,7 @@ export function AccountMode({ onRestored }: AccountModeProps) {
           ))}
         </div>
         <div className="muted small account-note">
-          This is a local account vault for now. It saves your Lichess token, repertoires, and history-card progress under one sign-in on this computer. Cloud sync will need a small hosted backend before it can follow you across devices.
+          This is a local account vault for now. It saves your Lichess token, repertoires, and trivia-card progress under one sign-in on this computer. Cloud sync will need a small hosted backend before it can follow you across devices.
         </div>
       </div>
 

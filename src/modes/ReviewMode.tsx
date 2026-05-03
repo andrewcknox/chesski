@@ -72,12 +72,12 @@ export function ReviewMode({ repertoire, onDataChange }: {
   return (
     <div className="layout review-layout">
       <div className="panel">
-        <h3>Review game</h3>
+        <h3>Analyze my game</h3>
         <div className="muted small settings-copy">
           Paste one PGN and Chesski will compare your moves to this repertoire, your ranked sources, and the engine.
         </div>
         <div className="row">
-          <label className="small muted">Review as</label>
+          <label className="small muted">Analyze as</label>
           <select value={side} onChange={e => setSide(e.target.value as Color)}>
             <option value="w">White</option>
             <option value="b">Black</option>
@@ -113,7 +113,7 @@ export function ReviewMode({ repertoire, onDataChange }: {
               <span className="muted small">{result.result} · {result.reviewedMoves} of your opening moves checked</span>
             </div>
             {result.moments.length === 0 ? (
-              <div className="account-status good small">No major opening issues found in the reviewed window.</div>
+              <div className="account-status good small">No major opening issues found in the analyzed window.</div>
             ) : (
               <div className="review-moment-list">
                 {result.moments.map(moment => (
@@ -156,7 +156,7 @@ function ReviewHistoryCard({ cardState, answerShown, onToggleAnswer, onGrade }: 
   const [before, after] = cardState.card.prompt.split('{{C1}}');
   return (
     <div className="cloze-card">
-      <div className="muted small">While Chesski reviews your game</div>
+      <div className="muted small">While Chesski analyzes your game</div>
       <div className="cloze-prompt">
         {before}
         <button className={'cloze-blank history-answer' + (answerShown ? ' revealed' : '')} onClick={onToggleAnswer} title="Click to pin answer">

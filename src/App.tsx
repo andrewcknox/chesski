@@ -232,16 +232,16 @@ function App() {
           <span className={'badge' + (dueCount === 0 ? ' zero' : '')}>{dueCount}</span>
         </button>
         <button className={'tab' + (tab === 'browse' ? ' active' : '')} onClick={() => setTab('browse')}>
-          Browse
+          My Lines
         </button>
         <button className={'tab' + (tab === 'review' ? ' active' : '')} onClick={() => setTab('review')}>
-          Review
+          Analyze My Game
         </button>
         <button className={'tab' + (tab === 'repertoires' ? ' active' : '')} onClick={() => setTab('repertoires')}>
           Repertoires
         </button>
         <button className={'tab' + (tab === 'history' ? ' active' : '')} onClick={() => setTab('history')}>
-          History
+          Trivia
           <span className={'badge' + (historyDueCount === 0 ? ' zero' : '')}>{historyDueCount}</span>
         </button>
         <button className={'tab' + (tab === 'settings' ? ' active' : '')} onClick={() => setTab('settings')}>
@@ -394,7 +394,7 @@ function NewRepertoireCreator({ repertoires, onCreated, compact }: {
           onChange={e => setProjectKind(e.target.checked ? 'siloed' : 'standard')}
         />
         <span>
-          Separate repertoire
+          Side repertoire
           <span className="muted small"> can contradict your main repertoire</span>
         </span>
       </label>

@@ -117,10 +117,10 @@ export function RepertoiresMode({
       <div className="panel">
         <h3>Repertoires</h3>
         <div className="muted small settings-copy">
-          Openings live inside a repertoire. Separate repertoires are for plans that intentionally disagree from the same position.
+          Openings live inside a repertoire. Side repertoires are for plans that intentionally disagree from the same position.
         </div>
         <ProjectGroup
-          title="Main repertoires"
+          title="main repertoire"
           reps={standard}
           activeRepId={activeRepId}
           counts={counts}
@@ -136,7 +136,7 @@ export function RepertoiresMode({
           onDelete={onDelete}
         />
         <ProjectGroup
-          title="Separate repertoires"
+          title="side repertoires"
           reps={siloed}
           activeRepId={activeRepId}
           counts={counts}
@@ -176,7 +176,7 @@ export function RepertoiresMode({
           {addStatus && <div className="small account-status good">{addStatus}</div>}
         </div>
         <div className="muted small account-note">
-          If the opening asks for a different move from a non-starting position, Chesski will ask you to make a separate repertoire instead.
+          If the opening asks for a different move from a non-starting position, Chesski will ask you to make a side repertoire instead.
         </div>
       </div>
     </div>
@@ -246,7 +246,7 @@ function ProjectGroup({
               )}
               <button className="primary" onClick={() => onOpen(rep.id)}>Open</button>
               <button onClick={() => onSetKind(rep, (rep.projectKind ?? 'standard') === 'siloed' ? 'standard' : 'siloed')}>
-                {(rep.projectKind ?? 'standard') === 'siloed' ? 'Move to main' : 'Make separate'}
+                {(rep.projectKind ?? 'standard') === 'siloed' ? 'Move to main repertoire' : 'Make side repertoire'}
               </button>
               <button onClick={() => onClone(rep)}>Clone</button>
               <button className="danger" onClick={() => onDelete(rep.id)}>Delete</button>

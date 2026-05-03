@@ -49,7 +49,7 @@ export function HistoryMode({ onProgressChange }: HistoryModeProps) {
   }
 
   async function resetProgress() {
-    if (!window.confirm('Reset chess history card progress?')) return;
+    if (!window.confirm('Reset chess trivia card progress?')) return;
     setProgressByCard({});
     setShowAnswer(false);
     setReviewedThisSession(0);
@@ -66,7 +66,7 @@ export function HistoryMode({ onProgressChange }: HistoryModeProps) {
     <div className="layout history-layout">
       <div className="panel history-study-panel">
         <div className="row">
-          <h3>Chess history</h3>
+          <h3>Chess trivia</h3>
           <span className="spacer" />
           <button onClick={resetProgress}>Reset</button>
         </div>
