@@ -953,13 +953,17 @@ function chooseLoadingHistoryCard(progressByCard: ProgressByCard): HistoryCardSt
   const now = new Date();
   const cards = buildHistoryCardStates(progressByCard, now)
     .filter(card => !progressByCard[card.id] || isHistoryDue(card.progress, now));
-  if (cards.length === 0) return null;
-  return cards
+  const fallbackCards = cards.length > 0 ? cards : buildHistoryCardStates(progressByCard, now);
+  if (fallbackCards.length === 0) return null;
+  return fallbackCards
     .sort((a, b) => {
       const dueDelta = Number(isHistoryDue(b.progress, now)) - Number(isHistoryDue(a.progress, now));
       if (dueDelta !== 0) return dueDelta;
       const newDelta = Number(!progressByCard[b.id]) - Number(!progressByCard[a.id]);
       if (newDelta !== 0) return newDelta;
+      const aReviewed = a.progress.lastReviewedAt ? new Date(a.progress.lastReviewedAt).getTime() : 0;
+      const bReviewed = b.progress.lastReviewedAt ? new Date(b.progress.lastReviewedAt).getTime() : 0;
+      if (aReviewed !== bReviewed) return aReviewed - bReviewed;
       return a.progress.dueAt.localeCompare(b.progress.dueAt);
     })[0];
 }

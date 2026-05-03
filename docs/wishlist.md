@@ -20,11 +20,6 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 
 - True cross-device sync still needs a hosted backend. The current local vault is file-backed and durable on this computer, but it does not follow the user across devices.
 
-## Chess History
-
-- Expand the chess history cloze cards into a broader spaced-repetition deck.
-- Keep history cards available while waiting for Lichess line generation, and also as their own study surface.
-
 ## Training And Review
 
 - When the user gets the last move wrong in a learning line, show clear wrong-answer feedback and show the correct move.
@@ -72,3 +67,5 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 - Moved always-visible token management into the Account tab.
 - Fixed tiny My Lines board previews by hiding oversized coordinates and clipping preview frames cleanly.
 - Made trivia cards appear in a random session order instead of always walking the same sequence.
+- Expanded the chess-history trivia deck from 10 to 40 cloze cards.
+- Kept trivia available on the line-loading screen by falling back to least-recently-reviewed cards when nothing is due.
