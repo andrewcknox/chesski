@@ -8,7 +8,7 @@ import { AccountMode } from './modes/AccountMode';
 import { SettingsMode } from './modes/SettingsMode';
 import { Board } from './components/Board';
 import { TokenModal } from './components/TokenModal';
-import { syncCurrentAccount } from './lib/accounts';
+import { getCurrentAccount, restoreCurrentAccount, syncCurrentAccount } from './lib/accounts';
 import {
   exportAll, importAll, type ExportData,
   listRepertoires, createRepertoire, createRepertoireFromFen,
@@ -76,7 +76,14 @@ function App() {
   }, []);
 
   const reloadRepertoires = useCallback(async () => {
-    const list = await listRepertoires();
+    let list = await listRepertoires();
+    if (list.length === 0) {
+      const currentAccount = await getCurrentAccount();
+      if (currentAccount?.hasSnapshot) {
+        await restoreCurrentAccount();
+        list = await listRepertoires();
+      }
+    }
     setRepertoires(list);
     if (list.length === 0) {
       setActiveRepId(null);
