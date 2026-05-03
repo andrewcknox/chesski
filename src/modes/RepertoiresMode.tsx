@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Repertoire } from '../types';
-import { addOpeningToRepertoire, cloneRepertoire, CURATED_OPENINGS, getEdgesForRepertoire, updateRepertoire } from '../lib/storage';
+import { cloneRepertoire, getEdgesForRepertoire, updateRepertoire } from '../lib/storage';
 
 export function RepertoiresMode({
   repertoires,
@@ -10,6 +10,7 @@ export function RepertoiresMode({
   onCreated,
   onChanged,
   onDelete,
+  onNewOpening,
 }: {
   repertoires: Repertoire[];
   activeRepId: string | null;
@@ -18,15 +19,12 @@ export function RepertoiresMode({
   onCreated: (rep: Repertoire) => void | Promise<void>;
   onChanged: () => void | Promise<void>;
   onDelete: (id: string) => void | Promise<void>;
+  onNewOpening: () => void;
 }) {
   const [counts, setCounts] = useState<Record<string, number>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [addTargetId, setAddTargetId] = useState(activeRepId ?? repertoires[0]?.id ?? '');
-  const [addOpeningKey, setAddOpeningKey] = useState(CURATED_OPENINGS[0]?.key ?? '');
-  const [addBusy, setAddBusy] = useState(false);
-  const [addStatus, setAddStatus] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -36,25 +34,6 @@ export function RepertoiresMode({
     })();
     return () => { cancelled = true; };
   }, [repertoires]);
-
-  useEffect(() => {
-    if (!repertoires.some(rep => rep.id === addTargetId)) {
-      setAddTargetId(activeRepId ?? repertoires[0]?.id ?? '');
-    }
-  }, [activeRepId, addTargetId, repertoires]);
-
-  const addTarget = repertoires.find(rep => rep.id === addTargetId) ?? repertoires[0] ?? null;
-  const compatibleOpenings = useMemo(
-    () => addTarget ? CURATED_OPENINGS.filter(opening => opening.color === addTarget.color) : CURATED_OPENINGS,
-    [addTarget]
-  );
-
-  useEffect(() => {
-    if (compatibleOpenings.length === 0) return;
-    if (!compatibleOpenings.some(opening => opening.key === addOpeningKey)) {
-      setAddOpeningKey(compatibleOpenings[0].key);
-    }
-  }, [addOpeningKey, compatibleOpenings]);
 
   function startRename(rep: Repertoire) {
     setEditingId(rep.id);
@@ -89,23 +68,6 @@ export function RepertoiresMode({
       await onCreated(cloned);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  async function addOpening() {
-    setError(null);
-    setAddStatus(null);
-    if (!addTargetId || !addOpeningKey) return;
-    setAddBusy(true);
-    try {
-      const opening = CURATED_OPENINGS.find(o => o.key === addOpeningKey);
-      const result = await addOpeningToRepertoire(addTargetId, addOpeningKey);
-      await onChanged();
-      setAddStatus(`Added ${opening?.name ?? 'opening'}: ${result.addedEdges} new moves, ${result.reusedEdges} already known.`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setAddBusy(false);
     }
   }
 
@@ -154,30 +116,12 @@ export function RepertoiresMode({
         {error && <div className="small account-status bad">{error}</div>}
       </div>
 
-      <div className="panel">
+      <div className="panel rep-opening-cta">
         <h3>Add opening</h3>
         <div className="account-note">
-          Use this when you want another opening branch inside the same repertoire, like Queen's Gambit and Evans Gambit in one White repertoire.
+          The visual catalog handles both new repertoires and adding another branch into an existing repertoire.
         </div>
-        <div className="new-rep" style={{ marginTop: 10 }}>
-          <select value={addTargetId} onChange={e => setAddTargetId(e.target.value)}>
-            {repertoires.map(rep => (
-              <option key={rep.id} value={rep.id}>{rep.name} ({rep.color === 'w' ? 'White' : 'Black'})</option>
-            ))}
-          </select>
-          <select value={addOpeningKey} onChange={e => setAddOpeningKey(e.target.value)}>
-            {compatibleOpenings.map(opening => (
-              <option key={opening.key} value={opening.key}>{opening.name}</option>
-            ))}
-          </select>
-          <button className="primary" onClick={addOpening} disabled={addBusy || !addTargetId || !addOpeningKey}>
-            {addBusy ? 'Adding...' : 'Add opening to repertoire'}
-          </button>
-          {addStatus && <div className="small account-status good">{addStatus}</div>}
-        </div>
-        <div className="muted small account-note">
-          If the opening asks for a different move from a non-starting position, Chesski will ask you to make a side repertoire instead.
-        </div>
+        <button className="primary rep-opening-cta-button" onClick={onNewOpening}>Open catalog</button>
       </div>
     </div>
   );

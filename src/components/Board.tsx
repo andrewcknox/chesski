@@ -21,6 +21,7 @@ export interface BoardProps {
   minSize?: number;
   maxSize?: number;
   onSizeChange?: (size: number) => void;
+  showNotation?: boolean;
   // Optional flash class on outer wrapper (e.g. 'board-flash-good' / 'board-flash-bad')
   flashClass?: string;
 }
@@ -39,6 +40,7 @@ export function Board({
   minSize = 360,
   maxSize = 900,
   onSizeChange,
+  showNotation = true,
   flashClass,
 }: BoardProps) {
   const positionFen = denormalizeFen(fen);
@@ -149,6 +151,7 @@ export function Board({
           allowDragOffBoard: false,
           dragActivationDistance: 0,
           showAnimations: animatePositionChange,
+          showNotation,
           animationDurationInMs: animatePositionChange ? 90 : 0,
           squareStyles,
           arrows: (arrows || []).map(a => ({ startSquare: a.startSquare, endSquare: a.endSquare, color: a.color ?? 'rgba(255,255,255,0.6)' })),

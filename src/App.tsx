@@ -3,6 +3,7 @@ import { TrainMode } from './modes/TrainMode';
 import { BrowseMode } from './modes/BrowseMode';
 import { ReviewMode } from './modes/ReviewMode';
 import { RepertoiresMode } from './modes/RepertoiresMode';
+import { NewOpeningMode } from './modes/NewOpeningMode';
 import { HistoryMode } from './modes/HistoryMode';
 import { AccountMode } from './modes/AccountMode';
 import { SettingsMode } from './modes/SettingsMode';
@@ -21,7 +22,7 @@ import { isDue } from './lib/srs';
 import { getHistoryDueCount } from './lib/historySrs';
 import type { Color, Repertoire } from './types';
 
-type Tab = 'home' | 'train' | 'browse' | 'review' | 'repertoires' | 'history' | 'settings' | 'account';
+type Tab = 'home' | 'train' | 'browse' | 'review' | 'new-opening' | 'repertoires' | 'history' | 'settings' | 'account';
 const META_LAST_REP = 'last_repertoire_id';
 const META_BOARD_SIZE = 'board_size';
 const DEFAULT_BOARD_SIZE = 640;
@@ -212,13 +213,20 @@ function App() {
       <div className="app">
         {manageModal}
         <h2 style={{ marginTop: 0 }}>Chesski</h2>
-        <div className="panel">
-          <h3>Create your first repertoire</h3>
-          <div className="muted small" style={{ marginBottom: 12 }}>
-            Start from an opening, an empty board tree, a FEN, a PGN, or a clone of an existing repertoire.
+        <NewOpeningMode
+          repertoires={repertoires}
+          activeRepId={activeRepId}
+          onCreated={handleCreated}
+          onChanged={async () => { await reloadRepertoires(); onDataChange(); }}
+          onOpen={handleOpenRepertoire}
+          startOnly
+        />
+        <details className="collapsible">
+          <summary>Custom repertoire tools</summary>
+          <div className="panel">
+            <NewRepertoireCreator repertoires={repertoires} onCreated={handleCreated} />
           </div>
-          <NewRepertoireCreator repertoires={repertoires} onCreated={handleCreated} />
-        </div>
+        </details>
         <div className="panel">
           <h3>Import an existing backup</h3>
           <div className="row">
@@ -270,6 +278,9 @@ function App() {
         <button className={'tab' + (tab === 'review' ? ' active' : '')} onClick={() => setTab('review')}>
           Analyze My Game
         </button>
+        <button className={'tab' + (tab === 'new-opening' ? ' active' : '')} onClick={() => setTab('new-opening')}>
+          New Opening
+        </button>
         <button className={'tab' + (tab === 'repertoires' ? ' active' : '')} onClick={() => setTab('repertoires')}>
           Repertoires
         </button>
@@ -302,6 +313,15 @@ function App() {
           {tab === 'train' && <TrainMode repertoire={activeRep} onDataChange={onDataChange} refreshKey={refreshKey} boardSize={boardSize} onBoardSizeChange={setBoardSize} />}
           {tab === 'browse' && <BrowseMode repertoire={activeRep} onDataChange={onDataChange} refreshKey={refreshKey} boardSize={boardSize} onBoardSizeChange={setBoardSize} />}
           {tab === 'review' && <ReviewMode repertoire={activeRep} onDataChange={onDataChange} />}
+          {tab === 'new-opening' && (
+            <NewOpeningMode
+              repertoires={repertoires}
+              activeRepId={activeRepId}
+              onCreated={handleCreated}
+              onChanged={async () => { await reloadRepertoires(); onDataChange(); }}
+              onOpen={handleOpenRepertoire}
+            />
+          )}
           {tab === 'repertoires' && (
             <RepertoiresMode
               repertoires={repertoires}
@@ -311,6 +331,7 @@ function App() {
               onCreated={handleCreated}
               onChanged={async () => { await reloadRepertoires(); onDataChange(); }}
               onDelete={handleDelete}
+              onNewOpening={() => setTab('new-opening')}
             />
           )}
           {tab === 'history' && <HistoryMode onProgressChange={onDataChange} />}
