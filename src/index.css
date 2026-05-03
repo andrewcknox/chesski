@@ -198,6 +198,14 @@ a { color: var(--accent); }
   flex: 0 0 auto;
   border: 1px solid var(--border);
 }
+.folder-preview-board .board-wrap,
+.line-card-board .board-wrap {
+  overflow: hidden;
+}
+.folder-preview-board svg,
+.line-card-board svg {
+  display: block;
+}
 .opening-lines-grid {
   padding: 8px;
   display: grid;

@@ -409,7 +409,14 @@ function OpeningGroupView({ group, selectedLeafFen, onSelect, repertoireColor, b
       >
         {previewFen && (
           <div className="folder-preview-board" style={{ pointerEvents: 'none' }}>
-            <Board fen={previewFen} orientation={previewOrientation} onMove={() => false} allowMoves={false} size={92} />
+            <Board
+              fen={previewFen}
+              orientation={previewOrientation}
+              onMove={() => false}
+              allowMoves={false}
+              size={92}
+              showNotation={false}
+            />
           </div>
         )}
         <span className="mono small muted" style={{ minWidth: 36 }}>{group.eco ?? '—'}</span>
@@ -448,8 +455,15 @@ function LineCard({ line, selected, onClick, boardSize }: { line: LineItem; sele
         background: selected ? 'var(--accent-dim)' : 'var(--bg-elev)',
       }}
     >
-      <div style={{ pointerEvents: 'none' }}>
-        <Board fen={line.leafFen} orientation={orientation} onMove={() => false} allowMoves={false} size={boardSize} />
+      <div className="line-card-board" style={{ pointerEvents: 'none' }}>
+        <Board
+          fen={line.leafFen}
+          orientation={orientation}
+          onMove={() => false}
+          allowMoves={false}
+          size={boardSize}
+          showNotation={false}
+        />
       </div>
       <div className="mono small" style={{ marginTop: 6, wordBreak: 'break-word' }}>
         {line.extensionSan || <span className="muted">(at the named position)</span>}
