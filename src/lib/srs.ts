@@ -31,6 +31,18 @@ export function gradePass(edge: Edge, now = new Date()): Edge {
   };
 }
 
+// Learning pass: mark the card as learned, but keep it due today so it can be reviewed
+// again in the same session/day.
+export function gradeLearnPass(edge: Edge, now = new Date()): Edge {
+  return {
+    ...edge,
+    reps: edge.reps + 1,
+    intervalDays: 0,
+    dueAt: now.toISOString(),
+    lastReviewedAt: now.toISOString(),
+  };
+}
+
 // SM-2 fail: drop ease, reset reps, requeue today.
 export function gradeFail(edge: Edge, now = new Date()): Edge {
   return {

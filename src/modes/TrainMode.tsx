@@ -3,8 +3,8 @@ import { Board } from '../components/Board';
 import { applyMove, turnAt } from '../lib/chess';
 import { continueLearnLine, generateLearnLine, evaluateMoveCpLoss, pvCpForSide, TUNING, type GeneratedLine } from '../lib/autosuggest';
 import { fetchCloudEval } from '../lib/lichess';
-import { getEdgesByMover, getEdgesForRepertoire, putEdge, swapMoveInRepertoire } from '../lib/storage';
-import { gradeFail, gradePass, isDue } from '../lib/srs';
+import { getEdge, getEdgesByMover, getEdgesForRepertoire, putEdge, swapMoveInRepertoire } from '../lib/storage';
+import { gradeFail, gradeLearnPass, gradePass, isDue } from '../lib/srs';
 import {
   buildHistoryCardStates,
   freshHistoryProgress,
@@ -140,7 +140,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     setStats(emptyStats());
     setGenError(null);
     if (mode === 'review-only') {
-      enterReviewPhase(mode);
+      void enterReviewPhase(mode);
       return;
     }
     setLoadingHistoryAnswerShown(false);
@@ -180,12 +180,9 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     onDataChange();
   }
 
-  function enterReviewPhase(mode: SessionMode) {
-    const now = new Date();
-    const queue = allEdges
-      .filter(e => e.mover === repertoire.color && isDue(e, now))
-      .sort((a, b) => new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime())
-      .slice(0, REVIEW_QUEUE_CAP);
+  async function enterReviewPhase(mode: SessionMode) {
+    const fresh = await getEdgesByMover(repertoire.id, repertoire.color);
+    const queue = buildReviewQueue(fresh, mode === 'learn-and-review');
     if (queue.length === 0) {
       setPhase({ kind: 'done', mode });
       return;
@@ -207,16 +204,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     if (result.uci === edge.uci) {
       // Correct.
       if (p.kind === 'test') {
-        if (!p.gradedEdges.has(edge.id)) {
-          const updated = gradePass(edge);
-          const newGraded = new Set(p.gradedEdges);
-          newGraded.add(edge.id);
-          setPhase({ ...p, gradedEdges: newGraded, sub: 'good-flash', lastWrongUci: null, sameWrongCount: 0, wrongCount: 0 });
-          void putEdge(updated);
-          setStats(s => ({ ...s, learnPassed: s.learnPassed + 1 }));
-        } else {
-          setPhase({ ...p, sub: 'good-flash', lastWrongUci: null, sameWrongCount: 0, wrongCount: 0 });
-        }
+        setPhase({ ...p, sub: 'good-flash', lastWrongUci: null, sameWrongCount: 0, wrongCount: 0 });
       } else {
         setPhase({ ...p, sub: 'good-flash', lastWrongUci: null, sameWrongCount: 0, wrongCount: 0 });
       }
@@ -342,6 +330,15 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
 
   function returnToAwait() {
     setPhase(p => {
+      if (p.kind === 'test' && p.sub === 'bad-flash' && p.passHadError && p.sameWrongCount < OVERRIDE_AFTER_SAME_WRONG_COUNT) {
+        return {
+          ...p,
+          cursorIdx: p.line.generationStartIndex,
+          passHadError: false,
+          passNumber: p.passNumber + 1,
+          sub: 'await',
+        };
+      }
       if (p.kind === 'walkthrough' || p.kind === 'test') {
         return { ...p, sub: 'await' };
       }
@@ -393,8 +390,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
         }
         // Done with line.
         setTimeout(() => {
-          setStats(s => ({ ...s, linesLearned: s.linesLearned + 1 }));
-          finishLine(p.mode);
+          void completeTestLine(p);
         }, 0);
         return p;
       }
@@ -412,16 +408,24 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
 
   async function reloadAndEnterReview(mode: SessionMode) {
     const fresh = await getEdgesByMover(repertoire.id, repertoire.color);
-    const now = new Date();
-    const queue = fresh
-      .filter(e => isDue(e, now))
-      .sort((a, b) => new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime())
-      .slice(0, REVIEW_QUEUE_CAP);
+    const queue = buildReviewQueue(fresh, mode === 'learn-and-review');
     if (queue.length === 0) {
       setPhase({ kind: 'done', mode });
       return;
     }
     setPhase({ kind: 'review', queue, idx: 0, mode, sub: 'await', lastWrongUci: null, sameWrongCount: 0, wrongCount: 0 });
+  }
+
+  async function completeTestLine(p: Extract<Phase, { kind: 'test' }>) {
+    const learnedEdges = p.line.newEdges.filter(e => e.mover === repertoire.color);
+    for (const edge of learnedEdges) {
+      const latest = await getEdge(repertoire.id, edge.parentFen, edge.childFen);
+      await putEdge(gradeLearnPass(latest ?? edge));
+    }
+    await reload();
+    onDataChange();
+    setStats(s => ({ ...s, learnPassed: s.learnPassed + learnedEdges.length, linesLearned: s.linesLearned + 1 }));
+    finishLine(p.mode);
   }
 
   // ---------- Review phase ----------
@@ -435,10 +439,12 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     const result = applyMove(card.parentFen, move);
     if (!result) return false;
     if (result.uci === card.uci) {
-      setPhase({ ...p, sub: 'good-flash', lastWrongUci: null, sameWrongCount: 0, wrongCount: 0 });
-      const updated = gradePass(card);
-      void putEdge(updated);
-      setStats(s => ({ ...s, reviewPassed: s.reviewPassed + 1 }));
+      setPhase({ ...p, sub: 'good-flash', lastWrongUci: null, sameWrongCount: 0 });
+      if (p.wrongCount === 0) {
+        const updated = gradePass(card);
+        void putEdge(updated);
+        setStats(s => ({ ...s, reviewPassed: s.reviewPassed + 1 }));
+      }
       return true;
     }
     // Wrong. Apply gradeFail on first wrong only.
@@ -481,6 +487,14 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
   function advanceReviewAfterFlash() {
     setPhase(p => {
       if (p.kind !== 'review') return p;
+      if (p.wrongCount > 0) {
+        const card = p.queue[p.idx];
+        if (!card) return { kind: 'done', mode: p.mode };
+        const queue = [...p.queue.slice(0, p.idx), ...p.queue.slice(p.idx + 1), card];
+        if (queue.length === 0) return { kind: 'done', mode: p.mode };
+        const idx = Math.min(p.idx, queue.length - 1);
+        return { ...p, queue, idx, sub: 'await', lastWrongUci: null, sameWrongCount: 0, wrongCount: 0 };
+      }
       const next = p.idx + 1;
       if (next >= p.queue.length) return { kind: 'done', mode: p.mode };
       return { ...p, idx: next, sub: 'await', lastWrongUci: null, sameWrongCount: 0, wrongCount: 0 };
@@ -817,6 +831,22 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
 
 function emptyStats(): SessionStats {
   return { learnPassed: 0, learnFailed: 0, reviewPassed: 0, reviewFailed: 0, reviewSkipped: 0, switched: 0, linesLearned: 0 };
+}
+
+function buildReviewQueue(edges: Edge[], includeFallback: boolean): Edge[] {
+  const now = new Date();
+  const due = edges
+    .filter(e => isDue(e, now))
+    .sort((a, b) => new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime());
+  if (due.length > 0 || !includeFallback) return due.slice(0, REVIEW_QUEUE_CAP);
+  return [...edges]
+    .sort((a, b) => {
+      const aReviewed = a.lastReviewedAt ? new Date(a.lastReviewedAt).getTime() : 0;
+      const bReviewed = b.lastReviewedAt ? new Date(b.lastReviewedAt).getTime() : 0;
+      if (aReviewed !== bReviewed) return aReviewed - bReviewed;
+      return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+    })
+    .slice(0, REVIEW_QUEUE_CAP);
 }
 
 function SourceGamePanel({ edge, line, color }: { edge: Edge | null; line: Edge[]; color: Repertoire['color'] }) {
