@@ -6,12 +6,13 @@ import { RepertoiresMode } from './modes/RepertoiresMode';
 import { HistoryMode } from './modes/HistoryMode';
 import { AccountMode } from './modes/AccountMode';
 import { SettingsMode } from './modes/SettingsMode';
+import { Board } from './components/Board';
 import { TokenModal } from './components/TokenModal';
 import {
   exportAll, importAll, type ExportData,
   listRepertoires, createRepertoire, createRepertoireFromFen,
   createRepertoireFromPgn, cloneRepertoire, deleteRepertoire,
-  getEdgesByMover, setMeta, getMeta,
+  getEdgesByMover, getEdgesForRepertoire, setMeta, getMeta,
   CURATED_OPENINGS,
 } from './lib/storage';
 import { getLichessToken } from './lib/lichess';
@@ -19,13 +20,13 @@ import { isDue } from './lib/srs';
 import { getHistoryDueCount } from './lib/historySrs';
 import type { Color, Repertoire } from './types';
 
-type Tab = 'train' | 'browse' | 'review' | 'repertoires' | 'history' | 'settings' | 'account';
+type Tab = 'home' | 'train' | 'browse' | 'review' | 'repertoires' | 'history' | 'settings' | 'account';
 const META_LAST_REP = 'last_repertoire_id';
 const META_BOARD_SIZE = 'board_size';
 const DEFAULT_BOARD_SIZE = 640;
 
 function App() {
-  const [tab, setTab] = useState<Tab>('train');
+  const [tab, setTab] = useState<Tab>('home');
   const [refreshKey, setRefreshKey] = useState(0);
   const [dueCount, setDueCount] = useState(0);
   const [historyDueCount, setHistoryDueCount] = useState(0);
@@ -117,6 +118,11 @@ function App() {
   function handleOpenRepertoire(id: string) {
     setActiveRepId(id);
     setTab('train');
+  }
+
+  function handleChooseRepertoire(id: string, nextTab: Tab = 'home') {
+    setActiveRepId(id);
+    setTab(nextTab);
   }
 
   async function handleDelete(id: string) {
@@ -227,6 +233,9 @@ function App() {
       </div>
 
       <div className="tabs">
+        <button className={'tab' + (tab === 'home' ? ' active' : '')} onClick={() => setTab('home')}>
+          Home
+        </button>
         <button className={'tab' + (tab === 'train' ? ' active' : '')} onClick={() => setTab('train')}>
           Train
           <span className={'badge' + (dueCount === 0 ? ' zero' : '')}>{dueCount}</span>
@@ -258,6 +267,14 @@ function App() {
 
       {activeRep ? (
         <>
+          {tab === 'home' && (
+            <HomeMode
+              repertoires={repertoires}
+              activeRepId={activeRepId}
+              refreshKey={refreshKey}
+              onChoose={handleChooseRepertoire}
+            />
+          )}
           {tab === 'train' && <TrainMode repertoire={activeRep} onDataChange={onDataChange} refreshKey={refreshKey} boardSize={boardSize} onBoardSizeChange={setBoardSize} />}
           {tab === 'browse' && <BrowseMode repertoire={activeRep} onDataChange={onDataChange} refreshKey={refreshKey} boardSize={boardSize} onBoardSizeChange={setBoardSize} />}
           {tab === 'review' && <ReviewMode repertoire={activeRep} onDataChange={onDataChange} />}
@@ -281,6 +298,171 @@ function App() {
       )}
     </div>
   );
+}
+
+interface HomeRepStats {
+  totalMoves: number;
+  userMoves: number;
+  dueMoves: number;
+  learnedMoves: number;
+}
+
+function HomeMode({ repertoires, activeRepId, refreshKey, onChoose }: {
+  repertoires: Repertoire[];
+  activeRepId: string | null;
+  refreshKey: number;
+  onChoose: (id: string, nextTab?: Tab) => void;
+}) {
+  const [statsByRep, setStatsByRep] = useState<Record<string, HomeRepStats>>({});
+  const activeRep = repertoires.find(rep => rep.id === activeRepId) ?? repertoires[0] ?? null;
+  const activeStats = activeRep ? statsByRep[activeRep.id] : undefined;
+  const mainRepertoires = repertoires.filter(rep => (rep.projectKind ?? 'standard') !== 'siloed');
+  const sideRepertoires = repertoires.filter(rep => rep.projectKind === 'siloed');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const now = new Date();
+      const entries = await Promise.all(repertoires.map(async rep => {
+        const edges = await getEdgesForRepertoire(rep.id);
+        const userEdges = edges.filter(edge => edge.mover === rep.color);
+        const stats: HomeRepStats = {
+          totalMoves: edges.length,
+          userMoves: userEdges.length,
+          dueMoves: userEdges.filter(edge => isDue(edge, now)).length,
+          learnedMoves: userEdges.filter(edge => edge.reps > 0).length,
+        };
+        return [rep.id, stats] as const;
+      }));
+      if (!cancelled) setStatsByRep(Object.fromEntries(entries));
+    })();
+    return () => { cancelled = true; };
+  }, [repertoires, refreshKey]);
+
+  if (!activeRep) return <div className="panel">Create a repertoire to start studying.</div>;
+
+  return (
+    <div className="home-layout">
+      <div className="panel home-current">
+        <div>
+          <h3>Current study</h3>
+          <div className="home-current-title">{activeRep.name}</div>
+          <div className="muted small">
+            {openingLabel(activeRep)} · {activeRep.color === 'w' ? 'White' : 'Black'} · {repKindLabel(activeRep)}
+          </div>
+          <div className="home-stat-grid">
+            <StatBlock value={activeStats?.dueMoves ?? 0} label="due" />
+            <StatBlock value={activeStats?.learnedMoves ?? 0} label="learned" />
+            <StatBlock value={activeStats?.userMoves ?? 0} label="cards" />
+            <StatBlock value={activeStats?.totalMoves ?? 0} label="moves" />
+          </div>
+          <div className="row home-actions">
+            <button className="primary" onClick={() => onChoose(activeRep.id, 'train')}>Train</button>
+            <button onClick={() => onChoose(activeRep.id, 'browse')}>My Lines</button>
+            <button onClick={() => onChoose(activeRep.id, 'review')}>Analyze My Game</button>
+          </div>
+        </div>
+        <div className="home-board-preview" style={{ pointerEvents: 'none' }}>
+          <Board
+            fen={activeRep.rootFen}
+            orientation={activeRep.color === 'w' ? 'white' : 'black'}
+            onMove={() => false}
+            allowMoves={false}
+            size={180}
+          />
+        </div>
+      </div>
+
+      <div className="home-picker">
+        <HomeRepertoireGroup
+          title="main repertoire"
+          repertoires={mainRepertoires}
+          activeRepId={activeRep.id}
+          statsByRep={statsByRep}
+          onChoose={onChoose}
+        />
+        <HomeRepertoireGroup
+          title="side repertoires"
+          repertoires={sideRepertoires}
+          activeRepId={activeRep.id}
+          statsByRep={statsByRep}
+          onChoose={onChoose}
+        />
+      </div>
+    </div>
+  );
+}
+
+function HomeRepertoireGroup({ title, repertoires, activeRepId, statsByRep, onChoose }: {
+  title: string;
+  repertoires: Repertoire[];
+  activeRepId: string;
+  statsByRep: Record<string, HomeRepStats>;
+  onChoose: (id: string, nextTab?: Tab) => void;
+}) {
+  return (
+    <div className="panel">
+      <h3>{title}</h3>
+      {repertoires.length === 0 ? (
+        <div className="settings-empty-drop">Nothing here yet</div>
+      ) : (
+        <div className="home-rep-grid">
+          {repertoires.map(rep => (
+            <HomeRepertoireCard
+              key={rep.id}
+              rep={rep}
+              active={rep.id === activeRepId}
+              stats={statsByRep[rep.id]}
+              onChoose={onChoose}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HomeRepertoireCard({ rep, active, stats, onChoose }: {
+  rep: Repertoire;
+  active: boolean;
+  stats?: HomeRepStats;
+  onChoose: (id: string, nextTab?: Tab) => void;
+}) {
+  return (
+    <div className={'home-rep-card' + (active ? ' active' : '')}>
+      <div className="home-rep-main">
+        <div className="home-rep-title">{rep.name}</div>
+        <div className="muted small">{openingLabel(rep)} · {rep.color === 'w' ? 'White' : 'Black'}</div>
+      </div>
+      <div className="home-mini-stats">
+        <span><strong>{stats?.dueMoves ?? 0}</strong> due</span>
+        <span><strong>{stats?.learnedMoves ?? 0}</strong> / {stats?.userMoves ?? 0} learned</span>
+      </div>
+      <div className="row home-rep-actions">
+        <button onClick={() => onChoose(rep.id)}>Select</button>
+        <button className="primary" onClick={() => onChoose(rep.id, 'train')}>Train</button>
+        <button onClick={() => onChoose(rep.id, 'browse')}>My Lines</button>
+      </div>
+    </div>
+  );
+}
+
+function StatBlock({ value, label }: { value: number; label: string }) {
+  return (
+    <div>
+      <strong>{value}</strong>
+      <span className="muted small">{label}</span>
+    </div>
+  );
+}
+
+function openingLabel(rep: Repertoire): string {
+  const opening = rep.openingKey ? CURATED_OPENINGS.find(item => item.key === rep.openingKey) : null;
+  return opening?.name ?? 'Custom opening';
+}
+
+function repKindLabel(rep: Repertoire): string {
+  return (rep.projectKind ?? 'standard') === 'siloed' ? 'side repertoire' : 'main repertoire';
 }
 
 function NewRepertoireCreator({ repertoires, onCreated, compact }: {
