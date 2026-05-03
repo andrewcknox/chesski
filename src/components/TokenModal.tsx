@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { getLichessToken, setLichessToken, validateLichessToken } from '../lib/lichess';
-import { createAccount, signIn, syncCurrentAccount } from '../lib/accounts';
+import { createAccount, signIn } from '../lib/accounts';
 
 export interface TokenModalProps {
   onSaved: () => void;
@@ -68,7 +68,6 @@ export function TokenModal({ onSaved, manage, initialValue = '', onCancel }: Tok
       await validateLichessToken(t);
       await setLichessToken(t);
       await createAccount(username, password);
-      await syncCurrentAccount();
       onSaved();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

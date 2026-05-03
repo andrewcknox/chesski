@@ -3,11 +3,14 @@ import {
   createAccount,
   getCurrentAccount,
   listAccountSummaries,
+  listRecoverySummaries,
   restoreCurrentAccount,
+  restoreRecoverySnapshot,
   signIn,
   signOut,
   syncCurrentAccount,
   type AccountSummary,
+  type RecoverySummary,
 } from '../lib/accounts';
 
 export interface AccountModeProps {
@@ -17,6 +20,7 @@ export interface AccountModeProps {
 export function AccountMode({ onRestored }: AccountModeProps) {
   const [current, setCurrent] = useState<AccountSummary | null>(null);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
+  const [recoveries, setRecoveries] = useState<RecoverySummary[]>([]);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [status, setStatus] = useState<string | null>(null);
@@ -24,9 +28,10 @@ export function AccountMode({ onRestored }: AccountModeProps) {
   const [busy, setBusy] = useState(false);
 
   async function reload() {
-    const [cur, list] = await Promise.all([getCurrentAccount(), listAccountSummaries()]);
+    const [cur, list, recoveryList] = await Promise.all([getCurrentAccount(), listAccountSummaries(), listRecoverySummaries()]);
     setCurrent(cur);
     setAccounts(list);
+    setRecoveries(recoveryList);
   }
 
   useEffect(() => { void reload(); }, []);
@@ -49,15 +54,16 @@ export function AccountMode({ onRestored }: AccountModeProps) {
   async function handleCreate() {
     await run(async () => {
       await createAccount(username, password);
-      await syncCurrentAccount();
       setPassword('');
-    }, 'Account created and current study data saved.');
+      onRestored();
+    }, 'Account created. Study data reset for a fresh start.');
   }
 
   async function handleSignIn() {
     await run(async () => {
       await signIn(username, password);
       setPassword('');
+      onRestored();
     }, 'Signed in.');
   }
 
@@ -77,12 +83,20 @@ export function AccountMode({ onRestored }: AccountModeProps) {
     await run(signOut, 'Signed out.');
   }
 
+  async function handleRecoveryRestore(id: string) {
+    if (!window.confirm('Restore this rescue snapshot? This replaces the current local repertoire and history-card progress.')) return;
+    await run(async () => {
+      await restoreRecoverySnapshot(id);
+      onRestored();
+    }, 'Restored rescue snapshot.');
+  }
+
   return (
     <div className="layout account-layout">
       <div className="panel">
         <h3>Account</h3>
         <div className="muted small settings-copy">
-          Choose a username and password, then create a local account. After that, Save to account stores your Lichess token, repertoires, and progress on this computer.
+          Choose a username and password, then create a local account. New accounts start with no repertoires or saved lines. After that, Save to account stores your Lichess token, repertoires, and progress on this computer.
         </div>
         {current ? (
           <>
@@ -143,6 +157,25 @@ export function AccountMode({ onRestored }: AccountModeProps) {
         </div>
         <div className="muted small account-note">
           This is a local account vault for now. It saves your Lichess token, repertoires, and history-card progress under one sign-in on this computer. Cloud sync will need a small hosted backend before it can follow you across devices.
+        </div>
+      </div>
+
+      <div className="panel">
+        <h3>Rescue snapshots</h3>
+        <div className="account-list">
+          {recoveries.length === 0 ? (
+            <div className="muted">No rescue snapshots yet.</div>
+          ) : recoveries.map(snapshot => (
+            <div key={snapshot.id} className="account-list-row">
+              <span>{snapshot.repertoireCount} reps · {snapshot.moveCount} moves</span>
+              <span className="spacer" />
+              <span className="muted small">{new Date(snapshot.exportedAt).toLocaleString()}</span>
+              <button onClick={() => handleRecoveryRestore(snapshot.id)} disabled={busy}>Restore</button>
+            </div>
+          ))}
+        </div>
+        <div className="muted small account-note">
+          Chesski saves one of these before a new account clears the current study data.
         </div>
       </div>
     </div>

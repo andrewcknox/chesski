@@ -4,6 +4,7 @@ import { getHistoryProgress, saveHistoryProgress, type ProgressByCard } from './
 
 const META_ACCOUNTS = 'local_accounts_v1';
 const META_CURRENT_ACCOUNT = 'current_account_v1';
+const META_RECOVERY_SNAPSHOTS = 'local_recovery_snapshots_v1';
 
 export interface AccountSnapshot {
   exportedAt: string;
@@ -24,8 +25,19 @@ export interface LocalAccount {
   snapshot: AccountSnapshot | null;
 }
 
+export interface RecoverySnapshot extends AccountSnapshot {
+  id: string;
+  reason: string;
+}
+
 export type AccountSummary = Pick<LocalAccount, 'id' | 'username' | 'createdAt' | 'lastSignedInAt' | 'lastSyncedAt'> & {
   hasSnapshot: boolean;
+};
+
+export type RecoverySummary = Pick<RecoverySnapshot, 'id' | 'exportedAt' | 'reason'> & {
+  repertoireCount: number;
+  moveCount: number;
+  historyCardCount: number;
 };
 
 function accountSummary(account: LocalAccount): AccountSummary {
@@ -45,6 +57,14 @@ async function getAccounts(): Promise<LocalAccount[]> {
 
 async function setAccounts(accounts: LocalAccount[]): Promise<void> {
   await setMeta(META_ACCOUNTS, accounts);
+}
+
+async function getRecoverySnapshots(): Promise<RecoverySnapshot[]> {
+  return (await getMeta<RecoverySnapshot[]>(META_RECOVERY_SNAPSHOTS)) ?? [];
+}
+
+async function setRecoverySnapshots(snapshots: RecoverySnapshot[]): Promise<void> {
+  await setMeta(META_RECOVERY_SNAPSHOTS, snapshots);
 }
 
 function normalizeUsername(username: string): string {
@@ -71,6 +91,20 @@ export async function listAccountSummaries(): Promise<AccountSummary[]> {
   return accounts.map(accountSummary).sort((a, b) => a.username.localeCompare(b.username));
 }
 
+export async function listRecoverySummaries(): Promise<RecoverySummary[]> {
+  const snapshots = await getRecoverySnapshots();
+  return snapshots
+    .map(snapshot => ({
+      id: snapshot.id,
+      exportedAt: snapshot.exportedAt,
+      reason: snapshot.reason,
+      repertoireCount: snapshot.data.repertoires.length,
+      moveCount: snapshot.data.edges.length,
+      historyCardCount: Object.keys(snapshot.historyProgress).length,
+    }))
+    .sort((a, b) => b.exportedAt.localeCompare(a.exportedAt));
+}
+
 export async function getCurrentAccount(): Promise<AccountSummary | null> {
   const currentId = await getMeta<string>(META_CURRENT_ACCOUNT);
   if (!currentId) return null;
@@ -86,6 +120,9 @@ export async function createAccount(username: string, password: string): Promise
   if (accounts.some(a => normalizeUsername(a.username) === clean)) throw new Error('That username already exists on this computer.');
   const now = new Date().toISOString();
   const salt = randomHex(16);
+  const token = await getLichessToken();
+  await saveRecoverySnapshot('Before new account reset');
+  const snapshot = freshAccountSnapshot(now, token);
   const account: LocalAccount = {
     id: `acct_${Date.now().toString(36)}_${randomHex(4)}`,
     username: username.trim(),
@@ -94,11 +131,12 @@ export async function createAccount(username: string, password: string): Promise
     createdAt: now,
     updatedAt: now,
     lastSignedInAt: now,
-    lastSyncedAt: null,
-    snapshot: null,
+    lastSyncedAt: now,
+    snapshot,
   };
   await setAccounts([...accounts, account]);
   await setMeta(META_CURRENT_ACCOUNT, account.id);
+  await resetStudyDataForNewAccount(token);
   return accountSummary(account);
 }
 
@@ -113,8 +151,10 @@ export async function signIn(username: string, password: string): Promise<Accoun
   accounts[idx] = updated;
   await setAccounts(accounts);
   await setMeta(META_CURRENT_ACCOUNT, updated.id);
-  if (updated.snapshot?.lichessToken) {
+  if (updated.snapshot) {
+    await importAll(updated.snapshot.data, 'replace');
     await setLichessToken(updated.snapshot.lichessToken);
+    await saveHistoryProgress(updated.snapshot.historyProgress);
   }
   return accountSummary(updated);
 }
@@ -151,4 +191,55 @@ export async function restoreCurrentAccount(): Promise<AccountSummary> {
   await setLichessToken(account.snapshot.lichessToken);
   await saveHistoryProgress(account.snapshot.historyProgress);
   return accountSummary(account);
+}
+
+export async function restoreRecoverySnapshot(id: string): Promise<void> {
+  const snapshot = (await getRecoverySnapshots()).find(s => s.id === id);
+  if (!snapshot) throw new Error('That recovery snapshot was not found.');
+  await importAll(snapshot.data, 'replace');
+  await setLichessToken(snapshot.lichessToken);
+  await saveHistoryProgress(snapshot.historyProgress);
+}
+
+async function saveRecoverySnapshot(reason: string): Promise<void> {
+  const now = new Date().toISOString();
+  const data = await exportAll();
+  const historyProgress = await getHistoryProgress();
+  const hasStudyData = data.repertoires.length > 0 || data.edges.length > 0 || Object.keys(historyProgress).length > 0;
+  if (!hasStudyData) return;
+  const snapshot: RecoverySnapshot = {
+    id: `recover_${Date.now().toString(36)}_${randomHex(4)}`,
+    reason,
+    exportedAt: now,
+    data,
+    lichessToken: await getLichessToken(),
+    historyProgress,
+  };
+  const existing = await getRecoverySnapshots();
+  await setRecoverySnapshots([snapshot, ...existing].slice(0, 8));
+}
+
+function freshAccountSnapshot(now: string, lichessToken: string | null): AccountSnapshot {
+  return {
+    exportedAt: now,
+    data: emptyExportData(now),
+    lichessToken,
+    historyProgress: {},
+  };
+}
+
+function emptyExportData(now: string): ExportData {
+  return {
+    version: 2,
+    exportedAt: now,
+    repertoires: [],
+    nodes: [],
+    edges: [],
+  };
+}
+
+async function resetStudyDataForNewAccount(lichessToken: string | null): Promise<void> {
+  await importAll(emptyExportData(new Date().toISOString()), 'replace');
+  await saveHistoryProgress({});
+  await setLichessToken(lichessToken);
 }

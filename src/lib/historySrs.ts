@@ -1,8 +1,9 @@
 import { CHESS_HISTORY_CLOZE, type HistoryClozeCard } from './chessHistory';
-import { addDaysISO, endOfTodayISO } from './srs';
+import { addDaysISO } from './srs';
 import { getMeta, setMeta } from './storage';
 
 export const META_HISTORY_PROGRESS = 'history_srs_progress_v1';
+const WRONG_COOLDOWN_MS = 3 * 60 * 1000;
 
 export interface HistoryProgress {
   ease: number;
@@ -49,7 +50,7 @@ export function gradeHistory(progress: HistoryProgress, grade: HistoryGrade, now
       intervalDays: 0,
       reps: 0,
       lapses: progress.lapses + 1,
-      dueAt: endOfTodayISO(now),
+      dueAt: new Date(now.getTime() + WRONG_COOLDOWN_MS).toISOString(),
       lastReviewedAt: now.toISOString(),
     };
   }

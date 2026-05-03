@@ -525,6 +525,11 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
           <div className="row">
             <h3>{phase.kind === 'generating' ? 'Preparing a new line...' : 'Line prepared'}</h3>
           </div>
+          <div className="muted small">
+            {phase.kind === 'generating'
+              ? 'Chesski is generating your line. Review a quick chess fact while you wait.'
+              : 'Your line is ready when you are.'}
+          </div>
           {loadingCard && (
             <LoadingHistoryCard
               cardState={loadingCard}
@@ -536,7 +541,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
           {phase.kind === 'line-ready' && (
             <div className="line-ready-action">
               <button className="primary study-line-button" onClick={() => studyPreparedLine(phase.line, phase.mode)}>
-                Study the line
+                Let's train!
               </button>
             </div>
           )}
@@ -927,7 +932,8 @@ function findSourceEdge(path: Edge[], cursorIdx: number, color: Repertoire['colo
 
 function chooseLoadingHistoryCard(progressByCard: ProgressByCard): HistoryCardState | null {
   const now = new Date();
-  const cards = buildHistoryCardStates(progressByCard, now);
+  const cards = buildHistoryCardStates(progressByCard, now)
+    .filter(card => !progressByCard[card.id] || isHistoryDue(card.progress, now));
   if (cards.length === 0) return null;
   return cards
     .sort((a, b) => {
