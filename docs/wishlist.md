@@ -19,7 +19,6 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 ## Accounts And Sync
 
 - True cross-device sync still needs a hosted backend. The current local vault is file-backed and durable on this computer, but it does not follow the user across devices.
-- Consider adding a clearer account/vault diagnostics panel if account storage ever feels mysterious again.
 
 ## Chess History
 
@@ -68,6 +67,7 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 - Added the first app-side local account vault: username/password, saved Lichess token, repertoire snapshots, and chess-history card progress.
 - Made Vite dev mode use the same file-backed local vault API as the durable desktop launcher.
 - Preserved current guest progress when creating an account after using the app without one.
+- Added Account tab diagnostics showing storage mode, vault file path, browser origin, saved accounts, and rescue snapshots.
 - Renamed the main tabs and labels to match Andy's language: Trivia, My Lines, Analyze My Game, main repertoire, side repertoires.
 - Moved always-visible token management into the Account tab.
 - Fixed tiny My Lines board previews by hiding oversized coordinates and clipping preview frames cleanly.

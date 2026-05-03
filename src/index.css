@@ -656,6 +656,25 @@ a { color: var(--accent); }
   margin-top: 14px;
   line-height: 1.5;
 }
+.account-diagnostics {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 10px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.account-diagnostics > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+.account-diagnostics strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 .home-layout {
   display: grid;

@@ -12,7 +12,7 @@ import {
   type AccountSummary,
   type RecoverySummary,
 } from '../lib/accounts';
-import { isPersistentVaultAvailable } from '../lib/localVault';
+import { getPersistentVaultStatus, type PersistentVaultStatus } from '../lib/localVault';
 import { TokenModal } from '../components/TokenModal';
 
 export interface AccountModeProps {
@@ -28,7 +28,7 @@ export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
   const [password, setPassword] = useState('');
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [vaultReady, setVaultReady] = useState<boolean | null>(null);
+  const [vaultStatus, setVaultStatus] = useState<PersistentVaultStatus | null | undefined>(undefined);
   const [showTokenManage, setShowTokenManage] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -37,12 +37,12 @@ export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
       getCurrentAccount(),
       listAccountSummaries(),
       listRecoverySummaries(),
-      isPersistentVaultAvailable(),
+      getPersistentVaultStatus(),
     ]);
     setCurrent(cur);
     setAccounts(list);
     setRecoveries(recoveryList);
-    setVaultReady(durable);
+    setVaultStatus(durable);
   }
 
   useEffect(() => { void reload(); }, []);
@@ -120,12 +120,12 @@ export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
         <div className="muted small settings-copy">
           Choose a username and password, then create a local account. If you already have repertoires or trivia progress in this browser, Chesski saves that into the new account. After that, Save to account stores your latest Lichess token, repertoires, and progress in Chesski's local vault on this computer.
         </div>
-        {vaultReady === false && (
+        {vaultStatus === null && (
           <div className="small account-status bad">
             File-backed vault is not connected. Accounts created here may only live in this browser session.
           </div>
         )}
-        {vaultReady === true && (
+        {vaultStatus?.ok && (
           <div className="small account-status good">
             File-backed vault connected.
           </div>
@@ -191,6 +191,28 @@ export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
         </div>
         <div className="muted small account-note">
           This is a file-backed local account vault. It survives app restarts, browser storage resets, and most local updates. Cloud sync will need a small hosted backend before it can follow you across devices.
+        </div>
+        <div className="account-diagnostics">
+          <div>
+            <span className="muted">Storage mode</span>
+            <strong>{vaultStatus === undefined ? 'checking...' : vaultStatus?.ok ? 'file-backed vault' : 'browser fallback'}</strong>
+          </div>
+          <div>
+            <span className="muted">Vault file</span>
+            <strong className="mono">{vaultStatus?.path || 'not connected'}</strong>
+          </div>
+          <div>
+            <span className="muted">Browser origin</span>
+            <strong className="mono">{window.location.origin}</strong>
+          </div>
+          <div>
+            <span className="muted">Saved accounts</span>
+            <strong>{accounts.length}</strong>
+          </div>
+          <div>
+            <span className="muted">Rescue snapshots</span>
+            <strong>{recoveries.length}</strong>
+          </div>
         </div>
       </div>
 

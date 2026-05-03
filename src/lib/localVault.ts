@@ -6,6 +6,11 @@ export interface PersistentVault {
   lichessToken: string | null;
 }
 
+export interface PersistentVaultStatus {
+  ok: boolean;
+  path: string;
+}
+
 function emptyVault(): PersistentVault {
   return {
     version: 1,
@@ -55,10 +60,21 @@ export async function loadPersistentVault(): Promise<PersistentVault | null> {
 
 export async function isPersistentVaultAvailable(): Promise<boolean> {
   try {
-    await requestJson<unknown>('/api/vault-status');
-    return true;
+    return !!(await getPersistentVaultStatus())?.ok;
   } catch {
     return false;
+  }
+}
+
+export async function getPersistentVaultStatus(): Promise<PersistentVaultStatus | null> {
+  try {
+    const status = await requestJson<Partial<PersistentVaultStatus>>('/api/vault-status');
+    return {
+      ok: status.ok === true,
+      path: typeof status.path === 'string' ? status.path : '',
+    };
+  } catch {
+    return null;
   }
 }
 
