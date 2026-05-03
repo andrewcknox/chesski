@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Repertoire } from '../types';
-import { cloneRepertoire, getEdgesForRepertoire, updateRepertoire } from '../lib/storage';
+import { addOpeningToRepertoire, cloneRepertoire, CURATED_OPENINGS, getEdgesForRepertoire, updateRepertoire } from '../lib/storage';
 
 export function RepertoiresMode({
   repertoires,
@@ -23,6 +23,10 @@ export function RepertoiresMode({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [addTargetId, setAddTargetId] = useState(activeRepId ?? repertoires[0]?.id ?? '');
+  const [addOpeningKey, setAddOpeningKey] = useState(CURATED_OPENINGS[0]?.key ?? '');
+  const [addBusy, setAddBusy] = useState(false);
+  const [addStatus, setAddStatus] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,6 +36,25 @@ export function RepertoiresMode({
     })();
     return () => { cancelled = true; };
   }, [repertoires]);
+
+  useEffect(() => {
+    if (!repertoires.some(rep => rep.id === addTargetId)) {
+      setAddTargetId(activeRepId ?? repertoires[0]?.id ?? '');
+    }
+  }, [activeRepId, addTargetId, repertoires]);
+
+  const addTarget = repertoires.find(rep => rep.id === addTargetId) ?? repertoires[0] ?? null;
+  const compatibleOpenings = useMemo(
+    () => addTarget ? CURATED_OPENINGS.filter(opening => opening.color === addTarget.color) : CURATED_OPENINGS,
+    [addTarget]
+  );
+
+  useEffect(() => {
+    if (compatibleOpenings.length === 0) return;
+    if (!compatibleOpenings.some(opening => opening.key === addOpeningKey)) {
+      setAddOpeningKey(compatibleOpenings[0].key);
+    }
+  }, [addOpeningKey, compatibleOpenings]);
 
   function startRename(rep: Repertoire) {
     setEditingId(rep.id);
@@ -69,18 +92,35 @@ export function RepertoiresMode({
     }
   }
 
+  async function addOpening() {
+    setError(null);
+    setAddStatus(null);
+    if (!addTargetId || !addOpeningKey) return;
+    setAddBusy(true);
+    try {
+      const opening = CURATED_OPENINGS.find(o => o.key === addOpeningKey);
+      const result = await addOpeningToRepertoire(addTargetId, addOpeningKey);
+      await onChanged();
+      setAddStatus(`Added ${opening?.name ?? 'opening'}: ${result.addedEdges} new moves, ${result.reusedEdges} already known.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAddBusy(false);
+    }
+  }
+
   const standard = repertoires.filter(rep => (rep.projectKind ?? 'standard') !== 'siloed');
   const siloed = repertoires.filter(rep => rep.projectKind === 'siloed');
 
   return (
     <div className="layout rep-manager-layout">
       <div className="panel">
-        <h3>Repertoire projects</h3>
+        <h3>Repertoires</h3>
         <div className="muted small settings-copy">
-          Standard projects are your main prep. Siloed projects are separate sandboxes that can intentionally disagree with your main repertoires.
+          Openings live inside a repertoire. Separate repertoires are for plans that intentionally disagree from the same position.
         </div>
         <ProjectGroup
-          title="Standard"
+          title="Main repertoires"
           reps={standard}
           activeRepId={activeRepId}
           counts={counts}
@@ -96,7 +136,7 @@ export function RepertoiresMode({
           onDelete={onDelete}
         />
         <ProjectGroup
-          title="Siloed"
+          title="Separate repertoires"
           reps={siloed}
           activeRepId={activeRepId}
           counts={counts}
@@ -115,12 +155,28 @@ export function RepertoiresMode({
       </div>
 
       <div className="panel">
-        <h3>How siloed projects work</h3>
+        <h3>Add opening</h3>
         <div className="account-note">
-          A siloed project has its own tree and training queue, so it can learn a different answer in the same position without overwriting your main repertoire.
+          Use this when you want another opening branch inside the same repertoire, like Queen's Gambit and Evans Gambit in one White repertoire.
+        </div>
+        <div className="new-rep" style={{ marginTop: 10 }}>
+          <select value={addTargetId} onChange={e => setAddTargetId(e.target.value)}>
+            {repertoires.map(rep => (
+              <option key={rep.id} value={rep.id}>{rep.name} ({rep.color === 'w' ? 'White' : 'Black'})</option>
+            ))}
+          </select>
+          <select value={addOpeningKey} onChange={e => setAddOpeningKey(e.target.value)}>
+            {compatibleOpenings.map(opening => (
+              <option key={opening.key} value={opening.key}>{opening.name}</option>
+            ))}
+          </select>
+          <button className="primary" onClick={addOpening} disabled={addBusy || !addTargetId || !addOpeningKey}>
+            {addBusy ? 'Adding...' : 'Add opening to repertoire'}
+          </button>
+          {addStatus && <div className="small account-status good">{addStatus}</div>}
         </div>
         <div className="muted small account-note">
-          The next layer is per-project source settings, so a Morphy-style project can use a different player order and engine tolerance than your tournament repertoire.
+          If the opening asks for a different move from a non-starting position, Chesski will ask you to make a separate repertoire instead.
         </div>
       </div>
     </div>
@@ -162,7 +218,7 @@ function ProjectGroup({
     <div className="rep-group">
       <h4>{title}</h4>
       {reps.length === 0 ? (
-        <div className="settings-empty-drop">No projects here</div>
+        <div className="settings-empty-drop">Nothing here yet</div>
       ) : reps.map(rep => {
         const editing = editingId === rep.id;
         return (
@@ -179,7 +235,7 @@ function ProjectGroup({
                 <button className="rep-title-button" onClick={() => onSelect(rep.id)}>{rep.name}</button>
               )}
               <div className="muted small">
-                {rep.color === 'w' ? 'White' : 'Black'} · {counts[rep.id] ?? 0} moves · {(rep.projectKind ?? 'standard') === 'siloed' ? 'siloed' : 'standard'}
+                {rep.color === 'w' ? 'White' : 'Black'} · {counts[rep.id] ?? 0} moves · {(rep.projectKind ?? 'standard') === 'siloed' ? 'separate' : 'main'}
               </div>
             </div>
             <div className="rep-card-actions">
@@ -190,7 +246,7 @@ function ProjectGroup({
               )}
               <button className="primary" onClick={() => onOpen(rep.id)}>Open</button>
               <button onClick={() => onSetKind(rep, (rep.projectKind ?? 'standard') === 'siloed' ? 'standard' : 'siloed')}>
-                {(rep.projectKind ?? 'standard') === 'siloed' ? 'Make standard' : 'Make siloed'}
+                {(rep.projectKind ?? 'standard') === 'siloed' ? 'Move to main' : 'Make separate'}
               </button>
               <button onClick={() => onClone(rep)}>Clone</button>
               <button className="danger" onClick={() => onDelete(rep.id)}>Delete</button>

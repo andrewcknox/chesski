@@ -23,6 +23,12 @@ export const CURATED_OPENINGS: CuratedOpening[] = [
     moves: ['e4', 'c6', 'd4', 'd5', 'exd5', 'cxd5'],
   },
   {
+    key: 'qg-w',
+    name: "Queen's Gambit",
+    color: 'w',
+    moves: ['d4', 'd5', 'c4'],
+  },
+  {
     key: 'exchange-ck-b',
     name: 'Exchange Caro-Kann',
     color: 'b',

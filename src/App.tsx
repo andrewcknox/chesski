@@ -185,7 +185,7 @@ function App() {
         <div className="panel">
           <h3>Create your first repertoire</h3>
           <div className="muted small" style={{ marginBottom: 12 }}>
-            Start from a template, an empty board tree, a FEN, a PGN, or a clone of an existing project.
+            Start from an opening, an empty board tree, a FEN, a PGN, or a clone of an existing repertoire.
           </div>
           <NewRepertoireCreator repertoires={repertoires} onCreated={handleCreated} />
         </div>
@@ -317,9 +317,9 @@ function NewRepertoireCreator({ repertoires, onCreated, compact }: {
       } else if (mode === 'empty') {
         rep = await createRepertoire({ name: name.trim() || 'New repertoire', color, projectKind });
       } else if (mode === 'fen') {
-        rep = await createRepertoireFromFen(name.trim() || 'Position repertoire', color, fen);
+        rep = await createRepertoireFromFen(name.trim() || 'Position repertoire', color, fen, projectKind);
       } else if (mode === 'pgn') {
-        rep = await createRepertoireFromPgn(name.trim() || 'PGN repertoire', color, pgn);
+        rep = await createRepertoireFromPgn(name.trim() || 'PGN repertoire', color, pgn, undefined, projectKind);
       } else {
         rep = await cloneRepertoire(cloneId, name.trim() || undefined);
       }
@@ -338,7 +338,7 @@ function NewRepertoireCreator({ repertoires, onCreated, compact }: {
     <div className={compact ? 'new-rep compact' : 'new-rep'}>
       <div className="row">
         <select value={mode} onChange={e => setMode(e.target.value as typeof mode)}>
-          <option value="template">From template</option>
+          <option value="template">From opening starter</option>
           <option value="empty">Empty</option>
           <option value="fen">From FEN</option>
           <option value="pgn">From PGN</option>
@@ -394,8 +394,8 @@ function NewRepertoireCreator({ repertoires, onCreated, compact }: {
           onChange={e => setProjectKind(e.target.checked ? 'siloed' : 'standard')}
         />
         <span>
-          Siloed project
-          <span className="muted small"> can contradict other repertoires</span>
+          Separate repertoire
+          <span className="muted small"> can contradict your main repertoire</span>
         </span>
       </label>
 

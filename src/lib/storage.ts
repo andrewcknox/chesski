@@ -156,16 +156,59 @@ export async function createRepertoireByKey(openingKey: string): Promise<Reperto
   return createRepertoireFromOpening(op);
 }
 
-export async function createRepertoireFromFen(name: string, color: Color, fen: string): Promise<Repertoire> {
-  const chess = new Chess(fen);
-  return createRepertoire({ name, color, rootFen: normalizeFen(chess.fen()) });
+export interface AddLineResult {
+  addedEdges: number;
+  reusedEdges: number;
 }
 
-export async function createRepertoireFromPgn(name: string, color: Color, pgn: string, maxPlies = 24): Promise<Repertoire> {
+export async function addOpeningToRepertoire(repertoireId: string, openingKey: string): Promise<AddLineResult> {
+  const opening = findOpening(openingKey);
+  if (!opening) throw new Error(`Unknown opening: ${openingKey}`);
+  const rep = await getRepertoire(repertoireId);
+  if (!rep) throw new Error('Could not find that repertoire.');
+  if (rep.color !== opening.color) {
+    throw new Error(`${opening.name} is a ${opening.color === 'w' ? 'White' : 'Black'} opening. Add it to a ${opening.color === 'w' ? 'White' : 'Black'} repertoire.`);
+  }
+  return addMovesToRepertoire(rep, opening.moves);
+}
+
+export async function addMovesToRepertoire(rep: Repertoire, moves: string[]): Promise<AddLineResult> {
+  let cursorFen: NormFen = rep.rootFen;
+  let addedEdges = 0;
+  let reusedEdges = 0;
+  for (const move of moves) {
+    const result = applyMove(cursorFen, move);
+    if (!result) throw new Error(`Could not add move ${move} from this position.`);
+
+    const outgoing = await getEdgesFromParent(rep.id, cursorFen);
+    const exact = outgoing.find(e => e.uci === result.uci);
+    const conflictsWithYourChoice = result.mover === rep.color
+      && cursorFen !== rep.rootFen
+      && outgoing.some(e => e.mover === rep.color && e.uci !== result.uci);
+    if (conflictsWithYourChoice) {
+      const existing = outgoing.find(e => e.mover === rep.color);
+      throw new Error(`That opening conflicts at ${existing?.san ?? 'an existing move'}. Create a separate repertoire if you want to study both choices from the same position.`);
+    }
+
+    const played = await playMoveInRepertoire(rep.id, cursorFen, move);
+    if (!played) throw new Error(`Could not add move ${move} from this position.`);
+    if (played.edgeCreated) addedEdges++;
+    else if (exact) reusedEdges++;
+    cursorFen = played.edge.childFen;
+  }
+  return { addedEdges, reusedEdges };
+}
+
+export async function createRepertoireFromFen(name: string, color: Color, fen: string, projectKind?: Repertoire['projectKind']): Promise<Repertoire> {
+  const chess = new Chess(fen);
+  return createRepertoire({ name, color, rootFen: normalizeFen(chess.fen()), projectKind });
+}
+
+export async function createRepertoireFromPgn(name: string, color: Color, pgn: string, maxPlies = 24, projectKind?: Repertoire['projectKind']): Promise<Repertoire> {
   const chess = new Chess();
   chess.loadPgn(pgn, { strict: false });
   const moves = chess.history().slice(0, maxPlies);
-  return createRepertoire({ name, color, moves });
+  return createRepertoire({ name, color, moves, projectKind });
 }
 
 export async function cloneRepertoire(sourceId: string, name?: string): Promise<Repertoire> {

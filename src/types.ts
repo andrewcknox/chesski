@@ -13,6 +13,8 @@ export interface Repertoire {
   // Curated opening this repertoire was created from (for display).
   openingKey: string | null;
   folderId?: string | null;
+  // Internal storage name kept for old data: "siloed" means a separate repertoire that
+  // can intentionally contradict the main repertoire from the same position.
   projectKind?: 'standard' | 'siloed';
   createdAt: string;
   updatedAt?: string;
