@@ -12,6 +12,7 @@ import {
   type AccountSummary,
   type RecoverySummary,
 } from '../lib/accounts';
+import { isPersistentVaultAvailable } from '../lib/localVault';
 
 export interface AccountModeProps {
   onRestored: () => void;
@@ -25,13 +26,20 @@ export function AccountMode({ onRestored }: AccountModeProps) {
   const [password, setPassword] = useState('');
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [vaultReady, setVaultReady] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function reload() {
-    const [cur, list, recoveryList] = await Promise.all([getCurrentAccount(), listAccountSummaries(), listRecoverySummaries()]);
+    const [cur, list, recoveryList, durable] = await Promise.all([
+      getCurrentAccount(),
+      listAccountSummaries(),
+      listRecoverySummaries(),
+      isPersistentVaultAvailable(),
+    ]);
     setCurrent(cur);
     setAccounts(list);
     setRecoveries(recoveryList);
+    setVaultReady(durable);
   }
 
   useEffect(() => { void reload(); }, []);
@@ -98,6 +106,16 @@ export function AccountMode({ onRestored }: AccountModeProps) {
         <div className="muted small settings-copy">
           Choose a username and password, then create a local account. New accounts start with no repertoires or saved lines. After that, Save to account stores your Lichess token, repertoires, and progress in Chesski's local vault on this computer.
         </div>
+        {vaultReady === false && (
+          <div className="small account-status bad">
+            File-backed vault is not connected. Accounts created here may only live in this browser session.
+          </div>
+        )}
+        {vaultReady === true && (
+          <div className="small account-status good">
+            File-backed vault connected.
+          </div>
+        )}
         {current ? (
           <>
             <div className="account-card">

@@ -53,6 +53,15 @@ export async function loadPersistentVault(): Promise<PersistentVault | null> {
   }
 }
 
+export async function isPersistentVaultAvailable(): Promise<boolean> {
+  try {
+    await requestJson<unknown>('/api/vault-status');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function savePersistentVault(vault: PersistentVault): Promise<boolean> {
   try {
     await requestJson('/api/vault', {
