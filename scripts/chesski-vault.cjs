@@ -17,7 +17,7 @@ function emptyVault() {
 
 function readVault() {
   try {
-    const raw = fs.readFileSync(VAULT_PATH, 'utf8');
+    const raw = fs.readFileSync(VAULT_PATH, 'utf8').replace(/^\uFEFF/, '');
     const parsed = JSON.parse(raw);
     return { ...emptyVault(), ...parsed, version: 1 };
   } catch {
