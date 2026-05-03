@@ -5,6 +5,7 @@ import {
   freshHistoryProgress,
   getHistoryProgress,
   gradeHistory,
+  historyCardId,
   isHistoryDue,
   nextDueLabel,
   saveHistoryProgress,
@@ -20,22 +21,28 @@ export function HistoryMode({ onProgressChange }: HistoryModeProps) {
   const [loaded, setLoaded] = useState(false);
   const [showAnswer, setShowAnswer] = useState(false);
   const [reviewedThisSession, setReviewedThisSession] = useState(0);
+  const [cardOrder, setCardOrder] = useState<string[]>(() => randomHistoryOrder());
 
   useEffect(() => {
     (async () => {
       const saved = await getHistoryProgress();
       setProgressByCard(saved);
+      setCardOrder(randomHistoryOrder());
       setLoaded(true);
     })();
   }, []);
 
   const now = useMemo(() => new Date(), [progressByCard]);
   const cardStats = useMemo(() => buildHistoryCardStates(progressByCard, now), [now, progressByCard]);
+  const orderedCardStats = useMemo(() => {
+    const order = new Map(cardOrder.map((id, index) => [id, index]));
+    return [...cardStats].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  }, [cardOrder, cardStats]);
 
-  const dueCards = cardStats.filter(item => isHistoryDue(item.progress, now));
-  const newCards = cardStats.filter(item => !progressByCard[item.id]);
+  const dueCards = orderedCardStats.filter(item => isHistoryDue(item.progress, now));
+  const newCards = orderedCardStats.filter(item => !progressByCard[item.id]);
   const learnedCount = cardStats.filter(item => item.progress.reps > 0 && !isHistoryDue(item.progress, now)).length;
-  const active = dueCards[0] ?? newCards[0] ?? cardStats.sort((a, b) => a.progress.dueAt.localeCompare(b.progress.dueAt))[0];
+  const active = dueCards[0] ?? newCards[0] ?? [...cardStats].sort((a, b) => a.progress.dueAt.localeCompare(b.progress.dueAt))[0];
 
   async function grade(cardIdToGrade: string, known: boolean) {
     const current = progressByCard[cardIdToGrade] ?? freshHistoryProgress();
@@ -53,6 +60,7 @@ export function HistoryMode({ onProgressChange }: HistoryModeProps) {
     setProgressByCard({});
     setShowAnswer(false);
     setReviewedThisSession(0);
+    setCardOrder(randomHistoryOrder());
     await saveHistoryProgress({});
     onProgressChange();
   }
@@ -115,4 +123,13 @@ export function HistoryMode({ onProgressChange }: HistoryModeProps) {
       </div>
     </div>
   );
+}
+
+function randomHistoryOrder(): string[] {
+  const ids = CHESS_HISTORY_CLOZE.map(historyCardId);
+  for (let i = ids.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+  }
+  return ids;
 }
