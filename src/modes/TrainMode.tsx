@@ -524,10 +524,6 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
         <div className="panel" style={{ gridColumn: '1 / -1' }}>
           <div className="row">
             <h3>{phase.kind === 'generating' ? 'Preparing a new line...' : 'Line prepared'}</h3>
-            <span className="spacer" />
-            {phase.kind === 'line-ready' && (
-              <button className="primary" onClick={() => studyPreparedLine(phase.line, phase.mode)}>Study the line</button>
-            )}
           </div>
           {loadingCard && (
             <LoadingHistoryCard
@@ -536,6 +532,13 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
               onToggleAnswer={() => setLoadingHistoryAnswerShown(shown => !shown)}
               onGrade={(knewIt) => void gradeLoadingHistoryCard(loadingCard.id, knewIt)}
             />
+          )}
+          {phase.kind === 'line-ready' && (
+            <div className="line-ready-action">
+              <button className="primary study-line-button" onClick={() => studyPreparedLine(phase.line, phase.mode)}>
+                Study the line
+              </button>
+            </div>
           )}
         </div>
       </div>

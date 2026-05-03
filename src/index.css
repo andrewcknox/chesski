@@ -367,6 +367,19 @@ a { color: var(--accent); }
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
 }
+.line-ready-action {
+  display: flex;
+  justify-content: center;
+  margin-top: 22px;
+}
+.study-line-button {
+  min-width: min(360px, 100%);
+  min-height: 64px;
+  padding: 16px 32px;
+  font-size: 21px;
+  font-weight: 800;
+  border-radius: 6px;
+}
 .cloze-prompt {
   margin-top: 8px;
   font-size: 18px;
