@@ -40,7 +40,6 @@ function App() {
   // Token gating
   const [tokenChecked, setTokenChecked] = useState(false);
   const [hasToken, setHasToken] = useState(false);
-  const [showTokenManage, setShowTokenManage] = useState(false);
 
   // Board size (persisted in meta)
   const [boardSize, setBoardSize] = useState<number>(DEFAULT_BOARD_SIZE);
@@ -203,15 +202,9 @@ function App() {
     return <TokenModal onSaved={() => setHasToken(true)} />;
   }
 
-  // Optional manage-token modal (can dismiss).
-  const manageModal = showTokenManage ? (
-    <TokenModal manage onSaved={() => setShowTokenManage(false)} onCancel={() => setShowTokenManage(false)} />
-  ) : null;
-
   if (repertoires.length === 0) {
     return (
       <div className="app">
-        {manageModal}
         <h2 style={{ marginTop: 0 }}>Chesski</h2>
         <NewOpeningMode
           repertoires={repertoires}
@@ -234,18 +227,12 @@ function App() {
             <input type="file" accept="application/json" ref={fileInputRef} onChange={handleImportFile} style={{ display: 'none' }} />
           </div>
         </div>
-        <div className="panel">
-          <div className="row">
-            <button onClick={() => setShowTokenManage(true)}>Manage Lichess token…</button>
-          </div>
-        </div>
       </div>
     );
   }
 
   return (
     <div className="app">
-      {manageModal}
       <div className="row" style={{ marginBottom: 10 }}>
         <strong>Repertoire:</strong>
         <select value={activeRepId ?? ''} onChange={e => setActiveRepId(e.target.value)}>
@@ -255,7 +242,6 @@ function App() {
         </select>
         <button onClick={() => activeRepId && handleDelete(activeRepId)} disabled={!activeRepId}>Delete</button>
         <span className="spacer" />
-        <button onClick={() => setShowTokenManage(true)} title="Manage your stored Lichess token">Token</button>
         <details style={{ marginLeft: 8 }}>
           <summary style={{ cursor: 'pointer', color: 'var(--accent)' }}>+ New repertoire</summary>
           <div style={{ marginTop: 8 }}>
@@ -336,7 +322,7 @@ function App() {
           )}
           {tab === 'history' && <HistoryMode onProgressChange={onDataChange} />}
           {tab === 'settings' && <SettingsMode />}
-          {tab === 'account' && <AccountMode onRestored={onAccountRestored} />}
+          {tab === 'account' && <AccountMode onRestored={onAccountRestored} onTokenChanged={onAccountRestored} />}
         </>
       ) : (
         <div className="panel">Select a repertoire above.</div>

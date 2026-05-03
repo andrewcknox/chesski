@@ -13,12 +13,14 @@ import {
   type RecoverySummary,
 } from '../lib/accounts';
 import { isPersistentVaultAvailable } from '../lib/localVault';
+import { TokenModal } from '../components/TokenModal';
 
 export interface AccountModeProps {
   onRestored: () => void;
+  onTokenChanged: () => void;
 }
 
-export function AccountMode({ onRestored }: AccountModeProps) {
+export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
   const [current, setCurrent] = useState<AccountSummary | null>(null);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [recoveries, setRecoveries] = useState<RecoverySummary[]>([]);
@@ -27,6 +29,7 @@ export function AccountMode({ onRestored }: AccountModeProps) {
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [vaultReady, setVaultReady] = useState<boolean | null>(null);
+  const [showTokenManage, setShowTokenManage] = useState(false);
   const [busy, setBusy] = useState(false);
 
   async function reload() {
@@ -101,6 +104,17 @@ export function AccountMode({ onRestored }: AccountModeProps) {
 
   return (
     <div className="layout account-layout">
+      {showTokenManage && (
+        <TokenModal
+          manage
+          onSaved={() => {
+            setShowTokenManage(false);
+            onTokenChanged();
+            void reload();
+          }}
+          onCancel={() => setShowTokenManage(false)}
+        />
+      )}
       <div className="panel">
         <h3>Account</h3>
         <div className="muted small settings-copy">
@@ -129,6 +143,7 @@ export function AccountMode({ onRestored }: AccountModeProps) {
             <div className="row account-actions">
               <button className="primary" onClick={handleSync} disabled={busy}>Save to account</button>
               <button onClick={handleRestore} disabled={busy || !current.hasSnapshot}>Restore from account</button>
+              <button onClick={() => setShowTokenManage(true)} disabled={busy}>Manage Lichess token</button>
               <button onClick={handleSignOut} disabled={busy}>Sign out</button>
             </div>
           </>
@@ -153,6 +168,7 @@ export function AccountMode({ onRestored }: AccountModeProps) {
             <div className="row account-actions">
               <button className="primary" onClick={handleCreate} disabled={busy}>Create account</button>
               <button onClick={handleSignIn} disabled={busy}>Sign in</button>
+              <button onClick={() => setShowTokenManage(true)} disabled={busy}>Manage Lichess token</button>
             </div>
           </>
         )}
