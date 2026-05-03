@@ -3,6 +3,9 @@ import { Board } from '../components/Board';
 import { TreeView } from '../components/TreeView';
 import { deleteSubtreeInRepertoire, getEdgesForRepertoire, getAllNodes, putEdge, resetAllSrsForRepertoire } from '../lib/storage';
 import { freshSrsState } from '../lib/srs';
+import { turnAt } from '../lib/chess';
+import { pvCpForSide } from '../lib/autosuggest';
+import { fetchCloudEval } from '../lib/lichess';
 import type { Edge, NormFen, PositionNode, Repertoire } from '../types';
 import ecoDataRaw from '../data/eco.json';
 
@@ -273,6 +276,7 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
                 {selectedLine.categoryEco ? `[${selectedLine.categoryEco}] ` : ''}{selectedLine.categoryName}
               </div>
             )}
+            <SelectedLineEval line={selectedLine} color={repertoire.color} />
           </div>
         )}
         <details className="collapsible" style={{ marginTop: 8 }}>
@@ -345,6 +349,47 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
       </div>
     </div>
   );
+}
+
+function SelectedLineEval({ line, color }: { line: LineItem; color: Repertoire['color'] }) {
+  const [evalCp, setEvalCp] = useState<number | null | undefined>(undefined);
+  const mistakeEdge = line.path.find(edge => edge.mover !== color && edge.isMistake);
+
+  useEffect(() => {
+    let cancelled = false;
+    setEvalCp(undefined);
+    (async () => {
+      try {
+        const evaluation = await fetchCloudEval(line.leafFen, 1);
+        if (cancelled) return;
+        if (!evaluation || evaluation.pvs.length === 0) {
+          setEvalCp(null);
+          return;
+        }
+        const cp = pvCpForSide(evaluation.pvs[0]);
+        setEvalCp(cp === null ? null : turnAt(line.leafFen) === color ? cp : -cp);
+      } catch {
+        if (cancelled) return;
+        setEvalCp(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [line.leafFen, color]);
+
+  return (
+    <div className={'line-eval-inline' + (mistakeEdge ? ' punishing' : '')}>
+      <span>{mistakeEdge ? 'Punishing' : 'Continuing'}</span>
+      <strong>{formatLineEval(evalCp)}</strong>
+    </div>
+  );
+}
+
+function formatLineEval(cp: number | null | undefined): string {
+  if (cp === undefined) return '...';
+  if (cp === null) return 'No cloud eval';
+  if (Math.abs(cp) > 90000) return cp > 0 ? 'Winning mate' : 'Mated';
+  const pawns = cp / 100;
+  return `${pawns >= 0 ? '+' : ''}${pawns.toFixed(2)}`;
 }
 
 function OpeningGroupView({ group, selectedLeafFen, onSelect, repertoireColor, boardThumbSize }: {

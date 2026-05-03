@@ -288,6 +288,58 @@ a { color: var(--accent); }
   margin-top: 8px;
 }
 
+.line-eval-panel {
+  border-color: rgba(240, 160, 32, 0.42);
+}
+.line-eval-panel.punishing {
+  border-color: rgba(76, 175, 80, 0.55);
+}
+.line-eval-kind {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+.line-eval-panel.punishing .line-eval-kind {
+  color: var(--good);
+}
+.line-eval-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.line-eval-grid > div {
+  padding: 8px;
+  border-radius: 4px;
+  background: var(--bg-elev-2);
+}
+.line-eval-grid span,
+.line-eval-grid strong {
+  display: block;
+}
+.line-eval-grid strong {
+  margin-top: 2px;
+  font-size: 18px;
+}
+.line-eval-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 4px 8px;
+  border: 1px solid rgba(240, 160, 32, 0.42);
+  border-radius: 4px;
+  background: rgba(240, 160, 32, 0.08);
+  font-size: 13px;
+}
+.line-eval-inline.punishing {
+  border-color: rgba(76, 175, 80, 0.48);
+  background: rgba(76, 175, 80, 0.1);
+}
+.line-eval-inline strong {
+  font-size: 14px;
+}
+
 .success-line {
   display: inline-flex;
   align-items: center;

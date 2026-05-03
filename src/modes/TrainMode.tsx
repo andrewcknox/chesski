@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Board } from '../components/Board';
 import { applyMove, turnAt } from '../lib/chess';
-import { continueLearnLine, generateLearnLine, evaluateMoveCpLoss, TUNING, type GeneratedLine } from '../lib/autosuggest';
+import { continueLearnLine, generateLearnLine, evaluateMoveCpLoss, pvCpForSide, TUNING, type GeneratedLine } from '../lib/autosuggest';
+import { fetchCloudEval } from '../lib/lichess';
 import { getEdgesByMover, getEdgesForRepertoire, putEdge, swapMoveInRepertoire } from '../lib/storage';
 import { gradeFail, gradePass, isDue } from '../lib/srs';
 import {
@@ -602,6 +603,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
             <h3>Line so far</h3>
             <div className="mono small">{sanLineUpToHere || '(start)'}</div>
           </div>
+          <LineEvalPanel line={phase.line.fullPath} currentFen={boardFen} color={repertoire.color} />
           <SourceGamePanel edge={sourceEdge} line={phase.line.fullPath} color={repertoire.color} />
         </div>
         <div className="modal-backdrop soft">
@@ -728,6 +730,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
             <h3>Line so far</h3>
             <div className="mono small">{sanLineUpToHere || '(start)'}</div>
           </div>
+          <LineEvalPanel line={phase.line.fullPath} currentFen={boardFen} color={repertoire.color} />
           <SourceGamePanel edge={sourceEdge} line={phase.line.fullPath} color={repertoire.color} />
           <div className="panel">
             <h3>Session</h3>
@@ -828,6 +831,71 @@ function SourceGamePanel({ edge, line, color }: { edge: Edge | null; line: Edge[
       )}
     </div>
   );
+}
+
+function LineEvalPanel({ line, currentFen, color }: { line: Edge[]; currentFen: string; color: Repertoire['color'] }) {
+  const [currentEval, setCurrentEval] = useState<number | null | undefined>(undefined);
+  const [finalEval, setFinalEval] = useState<number | null | undefined>(undefined);
+  const finalFen = line[line.length - 1]?.childFen ?? currentFen;
+  const mistakeEdge = line.find(edge => edge.mover !== color && edge.isMistake);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCurrentEval(undefined);
+    setFinalEval(undefined);
+    (async () => {
+      const [current, final] = await Promise.all([
+        evalForColor(currentFen, color),
+        finalFen === currentFen ? Promise.resolve(null) : evalForColor(finalFen, color),
+      ]);
+      if (cancelled) return;
+      setCurrentEval(current);
+      setFinalEval(finalFen === currentFen ? current : final);
+    })();
+    return () => { cancelled = true; };
+  }, [currentFen, finalFen, color]);
+
+  return (
+    <div className={'panel line-eval-panel' + (mistakeEdge ? ' punishing' : '')}>
+      <h3>Engine eval</h3>
+      <div className="line-eval-kind">
+        {mistakeEdge ? 'Punishing opponent mistake' : 'Continuing the line'}
+      </div>
+      {mistakeEdge && (
+        <div className="muted small">Opponent move: <span className="mono">{mistakeEdge.san}</span></div>
+      )}
+      <div className="line-eval-grid">
+        <div>
+          <span className="muted small">Current</span>
+          <strong>{formatEval(currentEval)}</strong>
+        </div>
+        <div>
+          <span className="muted small">Line end</span>
+          <strong>{formatEval(finalEval)}</strong>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+async function evalForColor(fen: string, color: Repertoire['color']): Promise<number | null> {
+  try {
+    const evaluation = await fetchCloudEval(fen, 1);
+    if (!evaluation || evaluation.pvs.length === 0) return null;
+    const cp = pvCpForSide(evaluation.pvs[0]);
+    if (cp === null) return null;
+    return turnAt(fen) === color ? cp : -cp;
+  } catch {
+    return null;
+  }
+}
+
+function formatEval(cp: number | null | undefined): string {
+  if (cp === undefined) return '...';
+  if (cp === null) return 'No cloud eval';
+  if (Math.abs(cp) > 90000) return cp > 0 ? 'Winning mate' : 'Mated';
+  const pawns = cp / 100;
+  return `${pawns >= 0 ? '+' : ''}${pawns.toFixed(2)}`;
 }
 
 function SourceGameDetails({ edge }: { edge: Edge | null }) {
