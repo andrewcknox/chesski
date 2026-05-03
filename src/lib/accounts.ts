@@ -196,9 +196,8 @@ export async function createAccount(username: string, password: string): Promise
   if (accounts.some(a => normalizeUsername(a.username) === clean)) throw new Error('That username already exists on this computer.');
   const now = new Date().toISOString();
   const salt = randomHex(16);
-  const token = await getLichessToken();
-  await saveRecoverySnapshot('Before new account reset');
-  const snapshot = freshAccountSnapshot(now, token);
+  await saveRecoverySnapshot('Before account creation');
+  const snapshot = await currentAccountSnapshot(now);
   const account: LocalAccount = {
     id: `acct_${Date.now().toString(36)}_${randomHex(4)}`,
     username: username.trim(),
@@ -212,7 +211,6 @@ export async function createAccount(username: string, password: string): Promise
   };
   await setAccounts([...accounts, account]);
   await setCurrentAccountId(account.id);
-  await resetStudyDataForNewAccount(token);
   return accountSummary(account);
 }
 
@@ -295,27 +293,11 @@ async function saveRecoverySnapshot(reason: string): Promise<void> {
   await setRecoverySnapshots([snapshot, ...existing].slice(0, 8));
 }
 
-function freshAccountSnapshot(now: string, lichessToken: string | null): AccountSnapshot {
+async function currentAccountSnapshot(now: string): Promise<AccountSnapshot> {
   return {
     exportedAt: now,
-    data: emptyExportData(now),
-    lichessToken,
-    historyProgress: {},
+    data: await exportAll(),
+    lichessToken: await getLichessToken(),
+    historyProgress: await getHistoryProgress(),
   };
-}
-
-function emptyExportData(now: string): ExportData {
-  return {
-    version: 2,
-    exportedAt: now,
-    repertoires: [],
-    nodes: [],
-    edges: [],
-  };
-}
-
-async function resetStudyDataForNewAccount(lichessToken: string | null): Promise<void> {
-  await importAll(emptyExportData(new Date().toISOString()), 'replace');
-  await saveHistoryProgress({});
-  await setLichessToken(lichessToken);
 }

@@ -64,7 +64,7 @@ export function AccountMode({ onRestored }: AccountModeProps) {
       await createAccount(username, password);
       setPassword('');
       onRestored();
-    }, 'Account created. Study data reset for a fresh start.');
+    }, 'Account created. Current progress saved to the account.');
   }
 
   async function handleSignIn() {
@@ -104,7 +104,7 @@ export function AccountMode({ onRestored }: AccountModeProps) {
       <div className="panel">
         <h3>Account</h3>
         <div className="muted small settings-copy">
-          Choose a username and password, then create a local account. New accounts start with no repertoires or saved lines. After that, Save to account stores your Lichess token, repertoires, and progress in Chesski's local vault on this computer.
+          Choose a username and password, then create a local account. If you already have repertoires or trivia progress in this browser, Chesski saves that into the new account. After that, Save to account stores your latest Lichess token, repertoires, and progress in Chesski's local vault on this computer.
         </div>
         {vaultReady === false && (
           <div className="small account-status bad">
@@ -193,7 +193,7 @@ export function AccountMode({ onRestored }: AccountModeProps) {
           ))}
         </div>
         <div className="muted small account-note">
-          Chesski saves one of these before a new account clears the current study data.
+          Chesski saves one of these before account changes that might affect current study data.
         </div>
       </div>
     </div>
