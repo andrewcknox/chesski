@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --open",
+    "chesski": "npm run build && node scripts/chesski-server.cjs",
+    "start": "node scripts/chesski-server.cjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

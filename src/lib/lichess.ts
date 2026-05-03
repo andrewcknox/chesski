@@ -1,5 +1,6 @@
 import { denormalizeFen } from './chess';
 import { getMeta, setMeta } from './storage';
+import { getPersistentLichessToken, setPersistentLichessToken } from './localVault';
 import type { NormFen } from '../types';
 
 export interface LichessMove {
@@ -44,6 +45,12 @@ let _tokenCache: string | null | undefined = undefined;
 
 export async function getLichessToken(): Promise<string | null> {
   if (_tokenCache !== undefined) return _tokenCache;
+  const durableToken = await getPersistentLichessToken();
+  if (durableToken !== undefined) {
+    _tokenCache = durableToken;
+    if (durableToken) await setMeta(META_TOKEN_KEY, durableToken);
+    return _tokenCache;
+  }
   const t = await getMeta<string>(META_TOKEN_KEY);
   _tokenCache = t ?? null;
   return _tokenCache;
@@ -51,6 +58,7 @@ export async function getLichessToken(): Promise<string | null> {
 
 export async function setLichessToken(token: string | null): Promise<void> {
   _tokenCache = token;
+  await setPersistentLichessToken(token);
   await setMeta(META_TOKEN_KEY, token);
 }
 

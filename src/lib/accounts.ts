@@ -1,6 +1,7 @@
 import { getLichessToken, setLichessToken } from './lichess';
 import { exportAll, getMeta, importAll, setMeta, type ExportData } from './storage';
 import { getHistoryProgress, saveHistoryProgress, type ProgressByCard } from './historySrs';
+import { loadPersistentVault, savePersistentVault, type PersistentVault } from './localVault';
 
 const META_ACCOUNTS = 'local_accounts_v1';
 const META_CURRENT_ACCOUNT = 'current_account_v1';
@@ -40,6 +41,11 @@ export type RecoverySummary = Pick<RecoverySnapshot, 'id' | 'exportedAt' | 'reas
   historyCardCount: number;
 };
 
+type AccountVault = PersistentVault & {
+  accounts: LocalAccount[];
+  recoverySnapshots: RecoverySnapshot[];
+};
+
 function accountSummary(account: LocalAccount): AccountSummary {
   return {
     id: account.id,
@@ -51,20 +57,90 @@ function accountSummary(account: LocalAccount): AccountSummary {
   };
 }
 
+function emptyVault(): AccountVault {
+  return {
+    version: 1,
+    accounts: [],
+    currentAccountId: null,
+    recoverySnapshots: [],
+    lichessToken: null,
+  };
+}
+
+function normalizeVault(vault: PersistentVault | null): AccountVault {
+  const base = vault ?? emptyVault();
+  return {
+    ...emptyVault(),
+    ...base,
+    version: 1,
+    accounts: Array.isArray(base.accounts) ? base.accounts as LocalAccount[] : [],
+    recoverySnapshots: Array.isArray(base.recoverySnapshots) ? base.recoverySnapshots as RecoverySnapshot[] : [],
+    currentAccountId: typeof base.currentAccountId === 'string' ? base.currentAccountId : null,
+    lichessToken: typeof base.lichessToken === 'string' ? base.lichessToken : null,
+  };
+}
+
+function hasVaultData(vault: AccountVault): boolean {
+  return vault.accounts.length > 0 || vault.recoverySnapshots.length > 0 || !!vault.currentAccountId || !!vault.lichessToken;
+}
+
+async function loadLegacyVault(): Promise<AccountVault> {
+  return {
+    ...emptyVault(),
+    accounts: (await getMeta<LocalAccount[]>(META_ACCOUNTS)) ?? [],
+    currentAccountId: (await getMeta<string>(META_CURRENT_ACCOUNT)) ?? null,
+    recoverySnapshots: (await getMeta<RecoverySnapshot[]>(META_RECOVERY_SNAPSHOTS)) ?? [],
+    lichessToken: await getLichessToken(),
+  };
+}
+
+async function getVault(): Promise<AccountVault> {
+  const durable = normalizeVault(await loadPersistentVault());
+  if (hasVaultData(durable)) return durable;
+
+  const legacy = await loadLegacyVault();
+  if (hasVaultData(legacy)) {
+    await savePersistentVault(legacy);
+    return legacy;
+  }
+  return durable;
+}
+
+async function setVault(vault: AccountVault): Promise<void> {
+  const normalized = normalizeVault(vault);
+  const savedDurably = await savePersistentVault(normalized);
+  if (!savedDurably) {
+    await setMeta(META_ACCOUNTS, normalized.accounts);
+    await setMeta(META_CURRENT_ACCOUNT, normalized.currentAccountId);
+    await setMeta(META_RECOVERY_SNAPSHOTS, normalized.recoverySnapshots);
+  }
+}
+
 async function getAccounts(): Promise<LocalAccount[]> {
-  return (await getMeta<LocalAccount[]>(META_ACCOUNTS)) ?? [];
+  return (await getVault()).accounts;
 }
 
 async function setAccounts(accounts: LocalAccount[]): Promise<void> {
-  await setMeta(META_ACCOUNTS, accounts);
+  const vault = await getVault();
+  await setVault({ ...vault, accounts });
+}
+
+async function getCurrentAccountId(): Promise<string | null> {
+  return (await getVault()).currentAccountId;
+}
+
+async function setCurrentAccountId(id: string | null): Promise<void> {
+  const vault = await getVault();
+  await setVault({ ...vault, currentAccountId: id });
 }
 
 async function getRecoverySnapshots(): Promise<RecoverySnapshot[]> {
-  return (await getMeta<RecoverySnapshot[]>(META_RECOVERY_SNAPSHOTS)) ?? [];
+  return (await getVault()).recoverySnapshots;
 }
 
 async function setRecoverySnapshots(snapshots: RecoverySnapshot[]): Promise<void> {
-  await setMeta(META_RECOVERY_SNAPSHOTS, snapshots);
+  const vault = await getVault();
+  await setVault({ ...vault, recoverySnapshots: snapshots });
 }
 
 function normalizeUsername(username: string): string {
@@ -106,7 +182,7 @@ export async function listRecoverySummaries(): Promise<RecoverySummary[]> {
 }
 
 export async function getCurrentAccount(): Promise<AccountSummary | null> {
-  const currentId = await getMeta<string>(META_CURRENT_ACCOUNT);
+  const currentId = await getCurrentAccountId();
   if (!currentId) return null;
   const account = (await getAccounts()).find(a => a.id === currentId);
   return account ? accountSummary(account) : null;
@@ -135,7 +211,7 @@ export async function createAccount(username: string, password: string): Promise
     snapshot,
   };
   await setAccounts([...accounts, account]);
-  await setMeta(META_CURRENT_ACCOUNT, account.id);
+  await setCurrentAccountId(account.id);
   await resetStudyDataForNewAccount(token);
   return accountSummary(account);
 }
@@ -150,7 +226,7 @@ export async function signIn(username: string, password: string): Promise<Accoun
   const updated = { ...account, lastSignedInAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   accounts[idx] = updated;
   await setAccounts(accounts);
-  await setMeta(META_CURRENT_ACCOUNT, updated.id);
+  await setCurrentAccountId(updated.id);
   if (updated.snapshot) {
     await importAll(updated.snapshot.data, 'replace');
     await setLichessToken(updated.snapshot.lichessToken);
@@ -160,11 +236,11 @@ export async function signIn(username: string, password: string): Promise<Accoun
 }
 
 export async function signOut(): Promise<void> {
-  await setMeta(META_CURRENT_ACCOUNT, null);
+  await setCurrentAccountId(null);
 }
 
 export async function syncCurrentAccount(): Promise<AccountSummary> {
-  const currentId = await getMeta<string>(META_CURRENT_ACCOUNT);
+  const currentId = await getCurrentAccountId();
   if (!currentId) throw new Error('Sign in before syncing.');
   const accounts = await getAccounts();
   const idx = accounts.findIndex(a => a.id === currentId);
@@ -183,7 +259,7 @@ export async function syncCurrentAccount(): Promise<AccountSummary> {
 }
 
 export async function restoreCurrentAccount(): Promise<AccountSummary> {
-  const currentId = await getMeta<string>(META_CURRENT_ACCOUNT);
+  const currentId = await getCurrentAccountId();
   if (!currentId) throw new Error('Sign in before restoring.');
   const account = (await getAccounts()).find(a => a.id === currentId);
   if (!account?.snapshot) throw new Error('This account does not have a saved sync snapshot yet.');

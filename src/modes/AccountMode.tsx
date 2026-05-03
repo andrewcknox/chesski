@@ -96,7 +96,7 @@ export function AccountMode({ onRestored }: AccountModeProps) {
       <div className="panel">
         <h3>Account</h3>
         <div className="muted small settings-copy">
-          Choose a username and password, then create a local account. New accounts start with no repertoires or saved lines. After that, Save to account stores your Lichess token, repertoires, and progress on this computer.
+          Choose a username and password, then create a local account. New accounts start with no repertoires or saved lines. After that, Save to account stores your Lichess token, repertoires, and progress in Chesski's local vault on this computer.
         </div>
         {current ? (
           <>
@@ -156,7 +156,7 @@ export function AccountMode({ onRestored }: AccountModeProps) {
           ))}
         </div>
         <div className="muted small account-note">
-          This is a local account vault for now. It saves your Lichess token, repertoires, and trivia-card progress under one sign-in on this computer. Cloud sync will need a small hosted backend before it can follow you across devices.
+          This is a file-backed local account vault. It survives app restarts, browser storage resets, and most local updates. Cloud sync will need a small hosted backend before it can follow you across devices.
         </div>
       </div>
 

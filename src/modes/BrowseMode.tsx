@@ -399,7 +399,7 @@ function OpeningGroupView({ group, selectedLeafFen, onSelect, repertoireColor, b
   repertoireColor: Repertoire['color'];
   boardThumbSize: number;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const previewLine = group.lines[0] ?? null;
   const previewFen = group.fen ?? previewLine?.leafFen ?? null;
   const previewOrientation: 'white' | 'black' = repertoireColor === 'w' ? 'white' : 'black';

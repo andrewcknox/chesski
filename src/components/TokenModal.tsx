@@ -166,7 +166,7 @@ export function TokenModal({ onSaved, manage, initialValue = '', onCancel }: Tok
           </>
         )}
         <div className="muted small" style={{ marginTop: 12 }}>
-          The token is stored only on this computer. If you save it to a local account, signing in restores it without needing to paste it again.
+          The token is stored only on this computer. In the desktop launcher it is also saved to Chesski's local vault, so signing in can restore it without needing to paste it again.
         </div>
       </div>
     </div>
