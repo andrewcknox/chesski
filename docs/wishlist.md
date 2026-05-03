@@ -4,12 +4,7 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 
 ## Repertoire And Database Ideas
 
-- Add a Home tab that clearly answers "what opening am I studying?" and lets the user pick the current opening/repertoire before training.
-- Later, split "New opening" into its own tab with board previews so adding openings feels visual and deliberate instead of buried in settings.
-- Add a chessreps.com-style opening catalog for adding openings to a repertoire: compact cards with the opening name and a small board showing the starting/signature position. Clicking an opening should take the user to a learn-more/add flow. Include openings from the start position as well as additions to existing repertoires.
-- Make it obvious how to add to the current repertoire; right now there is not a clear enough entry point.
-- Replace the top-right "+ New repertoire" control with a real "New Opening" tab. The old side-repertoire checkbox should become an explicit button/action for creating a side repertoire, then take the user into the same opening-creation flow used after account setup.
-- Redesign the current "Add opening" section in Repertoires. The two dropdowns are confusing; use the new visual opening catalog instead.
+- Replace the remaining top-right "+ New repertoire" advanced control with a clearer custom-import/tools path. The normal opening flow now lives in New Opening, but FEN/PGN/clone creation still needs a less awkward home.
 - In My Lines, when the user selects a line and it appears on the large board, show actions for "Review this prep" and "Learn a new line from here."
 - Add a right-side Masters database view inside Chesski, similar to the Lichess opening explorer.
 - Support downloaded top-player PGN bundles stored with the app instead of depending entirely on live API search.
@@ -23,16 +18,13 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 
 ## Accounts And Sync
 
-- Add a username and password flow so one account can own the stored Lichess token and eventually sync study data.
-- Treat this as a real account/sync project rather than just hiding the token locally behind a password prompt.
-- First app-side pass is implemented as a local account vault: username/password, saved token, repertoire snapshot, and chess-history card progress. True cross-device sync still needs a hosted backend.
-- If someone starts using the app without creating an account, then creates an account later in that same session, save the current progress into that new account instead of resetting it.
+- True cross-device sync still needs a hosted backend. The current local vault is file-backed and durable on this computer, but it does not follow the user across devices.
+- Consider adding a clearer account/vault diagnostics panel if account storage ever feels mysterious again.
 
 ## Chess History
 
 - Expand the chess history cloze cards into a broader spaced-repetition deck.
 - Keep history cards available while waiting for Lichess line generation, and also as their own study surface.
-- Show fun facts in random order instead of always walking the same sequence.
 
 ## Training And Review
 
@@ -56,9 +48,6 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 
 ## UI Clarity
 
-- Rename the main tabs and labels to match how Andy thinks about the app: History -> Trivia, Browse -> My Lines, Review -> Analyze My Game, Main repertoires -> main repertoire, and Separate repertoires -> side repertoires.
-- Move the always-visible Token button into the Account tab. It does not need to sit in the top bar all the time.
-- Fix tiny board previews. In My Lines, pieces appear vertically misaligned/submerged and coordinate labels are too large for the preview squares.
 - Do a systematic holistic UI pass after the current feature fixes: identify useful low-effort changes, run them by Andy, then execute the approved ones.
 
 ## Board Interaction
@@ -70,3 +59,16 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 ## Distribution And Setup
 
 - Make Chesski easy for people to download from GitHub and set up. Explore an installer EXE that installs dependencies/app files and creates a desktop icon. Estimate difficulty and choose the simplest durable packaging path.
+
+## Completed Recently
+
+- Added a Home tab that answers "what opening am I studying?" and lets the user pick the current opening/repertoire before training.
+- Added a New Opening tab with compact board-preview catalog cards for creating repertoires or adding openings to existing repertoires.
+- Replaced the confusing Repertoires "Add opening" dropdown panel with a visual-catalog entry point.
+- Added the first app-side local account vault: username/password, saved Lichess token, repertoire snapshots, and chess-history card progress.
+- Made Vite dev mode use the same file-backed local vault API as the durable desktop launcher.
+- Preserved current guest progress when creating an account after using the app without one.
+- Renamed the main tabs and labels to match Andy's language: Trivia, My Lines, Analyze My Game, main repertoire, side repertoires.
+- Moved always-visible token management into the Account tab.
+- Fixed tiny My Lines board previews by hiding oversized coordinates and clipping preview frames cleanly.
+- Made trivia cards appear in a random session order instead of always walking the same sequence.
