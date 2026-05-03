@@ -8,6 +8,7 @@ import { AccountMode } from './modes/AccountMode';
 import { SettingsMode } from './modes/SettingsMode';
 import { Board } from './components/Board';
 import { TokenModal } from './components/TokenModal';
+import { syncCurrentAccount } from './lib/accounts';
 import {
   exportAll, importAll, type ExportData,
   listRepertoires, createRepertoire, createRepertoireFromFen,
@@ -33,6 +34,7 @@ function App() {
   const [repertoires, setRepertoires] = useState<Repertoire[]>([]);
   const [activeRepId, setActiveRepId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const accountSyncTimerRef = useRef<number | null>(null);
 
   // Token gating
   const [tokenChecked, setTokenChecked] = useState(false);
@@ -94,11 +96,26 @@ function App() {
     if (activeRepId) void setMeta(META_LAST_REP, activeRepId);
   }, [activeRepId]);
 
+  const scheduleAccountSync = useCallback(() => {
+    if (accountSyncTimerRef.current !== null) window.clearTimeout(accountSyncTimerRef.current);
+    accountSyncTimerRef.current = window.setTimeout(() => {
+      accountSyncTimerRef.current = null;
+      void syncCurrentAccount().catch(() => {});
+    }, 900);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (accountSyncTimerRef.current !== null) window.clearTimeout(accountSyncTimerRef.current);
+    };
+  }, []);
+
   const onDataChange = useCallback(() => {
     setRefreshKey(k => k + 1);
     void refreshDueCount();
     void refreshHistoryDueCount();
-  }, [refreshDueCount, refreshHistoryDueCount]);
+    scheduleAccountSync();
+  }, [refreshDueCount, refreshHistoryDueCount, scheduleAccountSync]);
 
   const onAccountRestored = useCallback(() => {
     void (async () => {
