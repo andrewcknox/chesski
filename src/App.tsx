@@ -1,0 +1,412 @@
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { TrainMode } from './modes/TrainMode';
+import { BrowseMode } from './modes/BrowseMode';
+import { ReviewMode } from './modes/ReviewMode';
+import { RepertoiresMode } from './modes/RepertoiresMode';
+import { HistoryMode } from './modes/HistoryMode';
+import { AccountMode } from './modes/AccountMode';
+import { SettingsMode } from './modes/SettingsMode';
+import { TokenModal } from './components/TokenModal';
+import {
+  exportAll, importAll, type ExportData,
+  listRepertoires, createRepertoire, createRepertoireFromFen,
+  createRepertoireFromPgn, cloneRepertoire, deleteRepertoire,
+  getEdgesByMover, setMeta, getMeta,
+  CURATED_OPENINGS,
+} from './lib/storage';
+import { getLichessToken } from './lib/lichess';
+import { isDue } from './lib/srs';
+import { getHistoryDueCount } from './lib/historySrs';
+import type { Color, Repertoire } from './types';
+
+type Tab = 'train' | 'browse' | 'review' | 'repertoires' | 'history' | 'settings' | 'account';
+const META_LAST_REP = 'last_repertoire_id';
+const META_BOARD_SIZE = 'board_size';
+const DEFAULT_BOARD_SIZE = 640;
+
+function App() {
+  const [tab, setTab] = useState<Tab>('train');
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [dueCount, setDueCount] = useState(0);
+  const [historyDueCount, setHistoryDueCount] = useState(0);
+  const [repertoires, setRepertoires] = useState<Repertoire[]>([]);
+  const [activeRepId, setActiveRepId] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Token gating
+  const [tokenChecked, setTokenChecked] = useState(false);
+  const [hasToken, setHasToken] = useState(false);
+  const [showTokenManage, setShowTokenManage] = useState(false);
+
+  // Board size (persisted in meta)
+  const [boardSize, setBoardSize] = useState<number>(DEFAULT_BOARD_SIZE);
+
+  const activeRep = repertoires.find(r => r.id === activeRepId) ?? null;
+
+  // Initial load
+  useEffect(() => {
+    (async () => {
+      const tok = await getLichessToken();
+      setHasToken(!!tok);
+      setTokenChecked(true);
+      const sizeRaw = await getMeta<number>(META_BOARD_SIZE);
+      if (typeof sizeRaw === 'number') setBoardSize(sizeRaw);
+    })();
+  }, []);
+
+  // Persist board size whenever it changes (after initial load).
+  useEffect(() => {
+    if (!tokenChecked) return;
+    document.documentElement.style.setProperty('--board-col', boardSize + 'px');
+    void setMeta(META_BOARD_SIZE, boardSize);
+  }, [boardSize, tokenChecked]);
+
+  const refreshDueCount = useCallback(async () => {
+    if (!activeRep) { setDueCount(0); return; }
+    const edges = await getEdgesByMover(activeRep.id, activeRep.color);
+    const now = new Date();
+    setDueCount(edges.filter(e => isDue(e, now)).length);
+  }, [activeRep]);
+
+  const refreshHistoryDueCount = useCallback(async () => {
+    setHistoryDueCount(await getHistoryDueCount());
+  }, []);
+
+  const reloadRepertoires = useCallback(async () => {
+    const list = await listRepertoires();
+    setRepertoires(list);
+    if (list.length === 0) {
+      setActiveRepId(null);
+      return list;
+    }
+    if (activeRepId && list.some(r => r.id === activeRepId)) return list;
+    const lastId = await getMeta<string>(META_LAST_REP);
+    const fallback = lastId && list.some(r => r.id === lastId) ? lastId : list[0].id;
+    setActiveRepId(fallback);
+    return list;
+  }, [activeRepId]);
+
+  useEffect(() => { if (hasToken) void reloadRepertoires(); }, [reloadRepertoires, hasToken]);
+  useEffect(() => { void refreshDueCount(); void refreshHistoryDueCount(); }, [refreshDueCount, refreshHistoryDueCount, refreshKey]);
+
+  useEffect(() => {
+    if (activeRepId) void setMeta(META_LAST_REP, activeRepId);
+  }, [activeRepId]);
+
+  const onDataChange = useCallback(() => {
+    setRefreshKey(k => k + 1);
+    void refreshDueCount();
+    void refreshHistoryDueCount();
+  }, [refreshDueCount, refreshHistoryDueCount]);
+
+  const onAccountRestored = useCallback(() => {
+    void (async () => {
+      const tok = await getLichessToken();
+      setHasToken(!!tok);
+      await reloadRepertoires();
+      onDataChange();
+    })();
+  }, [reloadRepertoires, onDataChange]);
+
+  async function handleCreated(rep: Repertoire) {
+    await reloadRepertoires();
+    setActiveRepId(rep.id);
+    onDataChange();
+  }
+
+  function handleOpenRepertoire(id: string) {
+    setActiveRepId(id);
+    setTab('train');
+  }
+
+  async function handleDelete(id: string) {
+    const rep = repertoires.find(r => r.id === id);
+    if (!rep) return;
+    const ok = window.confirm(`Delete repertoire "${rep.name}" (${rep.color === 'w' ? 'White' : 'Black'})? All its edges and SRS state will be erased.`);
+    if (!ok) return;
+    await deleteRepertoire(id);
+    await reloadRepertoires();
+    onDataChange();
+  }
+
+  async function handleExport() {
+    const data = await exportAll();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    a.download = `chesski-${ts}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function handleImportClick() { fileInputRef.current?.click(); }
+
+  async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text) as ExportData;
+      if (data.version !== 2) throw new Error('Not a v2 export.');
+      const mode = window.confirm('Replace your current data with this file?\n\nOK = replace, Cancel = merge in.') ? 'replace' : 'merge';
+      await importAll(data, mode);
+      await reloadRepertoires();
+      onDataChange();
+      alert(`Import complete: ${data.repertoires.length} repertoires, ${data.nodes.length} nodes, ${data.edges.length} edges (${mode}).`);
+    } catch (err) {
+      alert('Import failed: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      e.target.value = '';
+    }
+  }
+
+  // Don't render anything until we've checked for the token.
+  if (!tokenChecked) return null;
+
+  // Forced token modal: must save before app loads.
+  if (!hasToken) {
+    return <TokenModal onSaved={() => setHasToken(true)} />;
+  }
+
+  // Optional manage-token modal (can dismiss).
+  const manageModal = showTokenManage ? (
+    <TokenModal manage onSaved={() => setShowTokenManage(false)} onCancel={() => setShowTokenManage(false)} />
+  ) : null;
+
+  if (repertoires.length === 0) {
+    return (
+      <div className="app">
+        {manageModal}
+        <h2 style={{ marginTop: 0 }}>Chesski</h2>
+        <div className="panel">
+          <h3>Create your first repertoire</h3>
+          <div className="muted small" style={{ marginBottom: 12 }}>
+            Start from a template, an empty board tree, a FEN, a PGN, or a clone of an existing project.
+          </div>
+          <NewRepertoireCreator repertoires={repertoires} onCreated={handleCreated} />
+        </div>
+        <div className="panel">
+          <h3>Import an existing backup</h3>
+          <div className="row">
+            <button onClick={handleImportClick}>Import JSON…</button>
+            <input type="file" accept="application/json" ref={fileInputRef} onChange={handleImportFile} style={{ display: 'none' }} />
+          </div>
+        </div>
+        <div className="panel">
+          <div className="row">
+            <button onClick={() => setShowTokenManage(true)}>Manage Lichess token…</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app">
+      {manageModal}
+      <div className="row" style={{ marginBottom: 10 }}>
+        <strong>Repertoire:</strong>
+        <select value={activeRepId ?? ''} onChange={e => setActiveRepId(e.target.value)}>
+          {repertoires.map(r => (
+            <option key={r.id} value={r.id}>{r.name} ({r.color === 'w' ? 'White' : 'Black'})</option>
+          ))}
+        </select>
+        <button onClick={() => activeRepId && handleDelete(activeRepId)} disabled={!activeRepId}>Delete</button>
+        <span className="spacer" />
+        <button onClick={() => setShowTokenManage(true)} title="Manage your stored Lichess token">Token</button>
+        <details style={{ marginLeft: 8 }}>
+          <summary style={{ cursor: 'pointer', color: 'var(--accent)' }}>+ New repertoire</summary>
+          <div style={{ marginTop: 8 }}>
+            <NewRepertoireCreator compact repertoires={repertoires} onCreated={handleCreated} />
+          </div>
+        </details>
+      </div>
+
+      <div className="tabs">
+        <button className={'tab' + (tab === 'train' ? ' active' : '')} onClick={() => setTab('train')}>
+          Train
+          <span className={'badge' + (dueCount === 0 ? ' zero' : '')}>{dueCount}</span>
+        </button>
+        <button className={'tab' + (tab === 'browse' ? ' active' : '')} onClick={() => setTab('browse')}>
+          Browse
+        </button>
+        <button className={'tab' + (tab === 'review' ? ' active' : '')} onClick={() => setTab('review')}>
+          Review
+        </button>
+        <button className={'tab' + (tab === 'repertoires' ? ' active' : '')} onClick={() => setTab('repertoires')}>
+          Repertoires
+        </button>
+        <button className={'tab' + (tab === 'history' ? ' active' : '')} onClick={() => setTab('history')}>
+          History
+          <span className={'badge' + (historyDueCount === 0 ? ' zero' : '')}>{historyDueCount}</span>
+        </button>
+        <button className={'tab' + (tab === 'settings' ? ' active' : '')} onClick={() => setTab('settings')}>
+          Settings
+        </button>
+        <button className={'tab' + (tab === 'account' ? ' active' : '')} onClick={() => setTab('account')}>
+          Account
+        </button>
+        <span className="spacer" />
+        <button className="tab" onClick={handleExport} title="Download a Chesski JSON backup">Backup</button>
+        <button className="tab" onClick={handleImportClick} title="Restore a Chesski JSON backup">Restore</button>
+        <input type="file" accept="application/json" ref={fileInputRef} onChange={handleImportFile} style={{ display: 'none' }} />
+      </div>
+
+      {activeRep ? (
+        <>
+          {tab === 'train' && <TrainMode repertoire={activeRep} onDataChange={onDataChange} refreshKey={refreshKey} boardSize={boardSize} onBoardSizeChange={setBoardSize} />}
+          {tab === 'browse' && <BrowseMode repertoire={activeRep} onDataChange={onDataChange} refreshKey={refreshKey} boardSize={boardSize} onBoardSizeChange={setBoardSize} />}
+          {tab === 'review' && <ReviewMode repertoire={activeRep} onDataChange={onDataChange} />}
+          {tab === 'repertoires' && (
+            <RepertoiresMode
+              repertoires={repertoires}
+              activeRepId={activeRepId}
+              onSelect={setActiveRepId}
+              onOpen={handleOpenRepertoire}
+              onCreated={handleCreated}
+              onChanged={async () => { await reloadRepertoires(); onDataChange(); }}
+              onDelete={handleDelete}
+            />
+          )}
+          {tab === 'history' && <HistoryMode onProgressChange={onDataChange} />}
+          {tab === 'settings' && <SettingsMode />}
+          {tab === 'account' && <AccountMode onRestored={onAccountRestored} />}
+        </>
+      ) : (
+        <div className="panel">Select a repertoire above.</div>
+      )}
+    </div>
+  );
+}
+
+function NewRepertoireCreator({ repertoires, onCreated, compact }: {
+  repertoires: Repertoire[];
+  onCreated: (rep: Repertoire) => void | Promise<void>;
+  compact?: boolean;
+}) {
+  const [mode, setMode] = useState<'template' | 'empty' | 'fen' | 'pgn' | 'clone'>('template');
+  const [name, setName] = useState('');
+  const [color, setColor] = useState<Color>('w');
+  const [templateKey, setTemplateKey] = useState(CURATED_OPENINGS[0]?.key ?? '');
+  const [fen, setFen] = useState('');
+  const [pgn, setPgn] = useState('');
+  const [cloneId, setCloneId] = useState(repertoires[0]?.id ?? '');
+  const [projectKind, setProjectKind] = useState<Repertoire['projectKind']>('standard');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function create() {
+    setBusy(true);
+    setError(null);
+    try {
+      let rep: Repertoire;
+      if (mode === 'template') {
+        const template = CURATED_OPENINGS.find(opening => opening.key === templateKey);
+        if (!template) throw new Error('Pick a template.');
+        rep = await createRepertoire({
+          name: name.trim() || template.name,
+          color: template.color,
+          openingKey: template.key,
+          moves: template.moves,
+          projectKind,
+        });
+      } else if (mode === 'empty') {
+        rep = await createRepertoire({ name: name.trim() || 'New repertoire', color, projectKind });
+      } else if (mode === 'fen') {
+        rep = await createRepertoireFromFen(name.trim() || 'Position repertoire', color, fen);
+      } else if (mode === 'pgn') {
+        rep = await createRepertoireFromPgn(name.trim() || 'PGN repertoire', color, pgn);
+      } else {
+        rep = await cloneRepertoire(cloneId, name.trim() || undefined);
+      }
+      await onCreated(rep);
+      setName('');
+      setFen('');
+      setPgn('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={compact ? 'new-rep compact' : 'new-rep'}>
+      <div className="row">
+        <select value={mode} onChange={e => setMode(e.target.value as typeof mode)}>
+          <option value="template">From template</option>
+          <option value="empty">Empty</option>
+          <option value="fen">From FEN</option>
+          <option value="pgn">From PGN</option>
+          <option value="clone" disabled={repertoires.length === 0}>Clone existing</option>
+        </select>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="Repertoire name" />
+      </div>
+
+      {mode === 'template' && (
+        <div className="new-rep-grid">
+          {CURATED_OPENINGS.map(opening => (
+            <button
+              key={opening.key}
+              className={opening.key === templateKey ? 'selected-choice' : ''}
+              onClick={() => setTemplateKey(opening.key)}
+            >
+              {opening.name} <span className="muted small">{opening.color === 'w' ? 'White' : 'Black'}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {mode !== 'template' && mode !== 'clone' && (
+        <div className="row">
+          <label className="small muted">Color</label>
+          <select value={color} onChange={e => setColor(e.target.value as Color)}>
+            <option value="w">White</option>
+            <option value="b">Black</option>
+          </select>
+        </div>
+      )}
+
+      {mode === 'fen' && (
+        <input className="new-rep-wide" value={fen} onChange={e => setFen(e.target.value)} placeholder="Paste FEN" />
+      )}
+
+      {mode === 'pgn' && (
+        <textarea className="new-rep-pgn" value={pgn} onChange={e => setPgn(e.target.value)} placeholder="Paste PGN" />
+      )}
+
+      {mode === 'clone' && (
+        <select value={cloneId} onChange={e => setCloneId(e.target.value)}>
+          {repertoires.map(rep => (
+            <option key={rep.id} value={rep.id}>{rep.name} ({rep.color === 'w' ? 'White' : 'Black'})</option>
+          ))}
+        </select>
+      )}
+
+      <label className="row new-rep-check">
+        <input
+          type="checkbox"
+          checked={projectKind === 'siloed'}
+          onChange={e => setProjectKind(e.target.checked ? 'siloed' : 'standard')}
+        />
+        <span>
+          Siloed project
+          <span className="muted small"> can contradict other repertoires</span>
+        </span>
+      </label>
+
+      <div className="row">
+        <button className="primary" onClick={create} disabled={busy || (mode === 'fen' && !fen.trim()) || (mode === 'pgn' && !pgn.trim())}>
+          {busy ? 'Creating...' : 'Create repertoire'}
+        </button>
+      </div>
+      {error && <div className="small account-status bad">{error}</div>}
+    </div>
+  );
+}
+
+export default App;
