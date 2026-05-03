@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Board } from '../components/Board';
 import { applyMove, turnAt } from '../lib/chess';
-import { continueLearnLine, generateLearnLine, evaluateMoveCpLoss, pvCpForSide, TUNING, type GeneratedLine } from '../lib/autosuggest';
+import { continueLearnLine, generateLearnLine, evaluateMoveCpLoss, pvCpForColor, TUNING, type GeneratedLine } from '../lib/autosuggest';
 import { fetchCloudEval } from '../lib/lichess';
 import { getEdge, getEdgesByMover, getEdgesForRepertoire, putEdge, swapMoveInRepertoire } from '../lib/storage';
 import { gradeFail, gradeLearnPass, gradePass, isDue } from '../lib/srs';
@@ -920,9 +920,7 @@ async function evalForColor(fen: string, color: Repertoire['color']): Promise<nu
   try {
     const evaluation = await fetchCloudEval(fen, 1);
     if (!evaluation || evaluation.pvs.length === 0) return null;
-    const cp = pvCpForSide(evaluation.pvs[0]);
-    if (cp === null) return null;
-    return turnAt(fen) === color ? cp : -cp;
+    return pvCpForColor(evaluation.pvs[0], color);
   } catch {
     return null;
   }

@@ -83,7 +83,7 @@ export async function pickYourMove(fen: NormFen, color: Color, signal?: AbortSig
   const bestUci = engine.pvs[0].moves.split(' ')[0];
   const m = applyMove(fen, uciToObj(bestUci));
   if (!m) return null;
-  return { san: m.san, uci: m.uci, source: 'engine', evalCp: pvCpForSide(engine.pvs[0]) ?? undefined };
+  return { san: m.san, uci: m.uci, source: 'engine', evalCp: pvCpForColor(engine.pvs[0], color) ?? undefined };
 }
 
 async function pickEngineSafePlayerBookMove(
@@ -96,7 +96,7 @@ async function pickEngineSafePlayerBookMove(
 ): Promise<(PlayerBookPick & { cpLoss: number | null }) | null> {
   const candidates = await getPlayerBookMoves(playerKey, fen, color, signal);
   for (const candidate of candidates) {
-    const cpLoss = await candidateCpLoss(fen, candidate.uci, getEngine, signal);
+    const cpLoss = await candidateCpLoss(fen, candidate.uci, color, getEngine, signal);
     if (cpLoss === null || cpLoss <= maxCpLoss) {
       return { ...candidate, cpLoss };
     }
@@ -144,14 +144,14 @@ async function pickDatabaseMove(
   if (candidates.length === 0) return null;
 
   const engine = await getEngine();
-  const filtered = filterByEngineEval(candidates, engine);
+  const filtered = filterByEngineEval(candidates, color, engine);
   const winner = rankCandidates(filtered.length > 0 ? filtered : candidates);
   const bestPv = engine ? findPvForMove(engine, winner.uci) : null;
   return {
     san: winner.san,
     uci: winner.uci,
     source,
-    evalCp: bestPv ? (pvCpForSide(bestPv) ?? undefined) : undefined,
+    evalCp: bestPv ? (pvCpForColor(bestPv, color) ?? undefined) : undefined,
     popularityFraction: winner.total > 0 ? winner.total / sumTotals(candidates) : 0,
     winRate: decisivenessRate(winner),
   };
@@ -160,24 +160,25 @@ async function pickDatabaseMove(
 async function candidateCpLoss(
   fen: NormFen,
   uci: string,
+  color: Color,
   getEngine: () => Promise<CloudEvalResponse | null>,
   signal?: AbortSignal
 ): Promise<number | null> {
   const engine = await getEngine();
   if (!engine || engine.pvs.length === 0) return null;
-  const bestCp = pvCpForSide(engine.pvs[0]);
+  const bestCp = pvCpForColor(engine.pvs[0], color);
   if (bestCp === null) return null;
   const pv = findPvForMove(engine, uci);
   if (pv) {
-    const cp = pvCpForSide(pv);
+    const cp = pvCpForColor(pv, color);
     return cp === null ? null : bestCp - cp;
   }
   const attempted = applyMove(fen, uciToObj(uci));
   if (!attempted) return null;
   const post = await fetchCloudEval(attempted.fen, 1, signal);
   if (!post || post.pvs.length === 0) return null;
-  const postCp = pvCpForSide(post.pvs[0]);
-  return postCp === null ? null : bestCp + postCp;
+  const postCp = pvCpForColor(post.pvs[0], color);
+  return postCp === null ? null : bestCp - postCp;
 }
 
 function sumTotals(arr: MovePop[]): number {
@@ -207,9 +208,9 @@ function rankCandidates(arr: MovePop[]): MovePop {
   return best;
 }
 
-function filterByEngineEval(candidates: MovePop[], engine: CloudEvalResponse | null): MovePop[] {
+function filterByEngineEval(candidates: MovePop[], color: Color, engine: CloudEvalResponse | null): MovePop[] {
   if (!engine || engine.pvs.length === 0) return candidates;
-  const bestCp = pvCpForSide(engine.pvs[0]);
+  const bestCp = pvCpForColor(engine.pvs[0], color);
   if (bestCp === null) return candidates;
   const minCp = bestCp - TUNING.evalThresholdPawn * 100;
   // Only candidates whose engine eval is within threshold survive.
@@ -218,7 +219,7 @@ function filterByEngineEval(candidates: MovePop[], engine: CloudEvalResponse | n
   for (const c of candidates) {
     const pv = findPvForMove(engine, c.uci);
     if (!pv) continue;
-    const cp = pvCpForSide(pv);
+    const cp = pvCpForColor(pv, color);
     if (cp === null) continue;
     if (cp >= minCp) out.push(c);
   }
@@ -232,13 +233,20 @@ export function findPvForMove(engine: CloudEvalResponse, uci: string): import('.
   return null;
 }
 
-// Cloud-eval cp is from the side-to-move perspective. Higher = better for the side to move.
-// Mate scores: + means winning mate for STM. Convert to a large cp number.
-export function pvCpForSide(pv: import('./lichess').CloudEvalPv): number | null {
+// Lichess cloud-eval cp is from White's perspective. Higher = better for White.
+// Mate scores use the same sign convention. Convert to a large cp number.
+export function pvCpForWhite(pv: import('./lichess').CloudEvalPv): number | null {
   if (pv.cp !== undefined) return pv.cp;
   if (pv.mate !== undefined) return pv.mate > 0 ? 100000 - pv.mate : -100000 - pv.mate;
   return null;
 }
+
+export function pvCpForColor(pv: import('./lichess').CloudEvalPv, color: Color): number | null {
+  const cp = pvCpForWhite(pv);
+  return cp === null ? null : color === 'w' ? cp : -cp;
+}
+
+export const pvCpForSide = pvCpForWhite;
 
 export function uciToObj(uci: string): { from: string; to: string; promotion?: string } {
   return { from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci.length > 4 ? uci.slice(4) : undefined };
@@ -259,7 +267,8 @@ export async function evaluateMoveCpLoss(fen: NormFen, attemptedUci: string, sig
   const attemptedSan = attempted?.san ?? null;
   if (!engine || engine.pvs.length === 0) return { cpLoss: null, best: null, attemptedSan };
   const bestPv = engine.pvs[0];
-  const bestCp = pvCpForSide(bestPv);
+  const mover = turnAt(fen);
+  const bestCp = pvCpForColor(bestPv, mover);
   if (bestCp === null) return { cpLoss: null, best: null, attemptedSan };
   const bestUci = bestPv.moves.split(' ')[0];
   const bestApplied = applyMove(fen, uciToObj(bestUci));
@@ -267,18 +276,16 @@ export async function evaluateMoveCpLoss(fen: NormFen, attemptedUci: string, sig
   const best = { uci: bestUci, san: bestSan, cp: bestCp };
   const pv = findPvForMove(engine, attemptedUci);
   if (pv) {
-    const cp = pvCpForSide(pv);
+    const cp = pvCpForColor(pv, mover);
     if (cp === null) return { cpLoss: null, best, attemptedSan };
     return { cpLoss: bestCp - cp, best, attemptedSan };
   }
   if (!attempted) return { cpLoss: null, best, attemptedSan };
-  // Re-evaluate the resulting position (from opponent's perspective).
   const post = await fetchCloudEval(attempted.fen, 1, signal);
   if (!post || post.pvs.length === 0) return { cpLoss: null, best, attemptedSan };
-  const postCp = pvCpForSide(post.pvs[0]);
+  const postCp = pvCpForColor(post.pvs[0], mover);
   if (postCp === null) return { cpLoss: null, best, attemptedSan };
-  const attemptedCp = -postCp;
-  return { cpLoss: bestCp - attemptedCp, best, attemptedSan };
+  return { cpLoss: bestCp - postCp, best, attemptedSan };
 }
 
 // ---------- Pick OPPONENT moves to enumerate ----------
@@ -301,7 +308,8 @@ export async function pickOpponentMoves(fen: NormFen, signal?: AbortSignal): Pro
   const total = resp.white + resp.draws + resp.black;
   if (total === 0) return [];
   const engine = await fetchCloudEval(fen, TUNING.cloudEvalMultiPv, signal);
-  const bestCp = engine && engine.pvs.length > 0 ? pvCpForSide(engine.pvs[0]) : null;
+  const mover = turnAt(fen);
+  const bestCp = engine && engine.pvs.length > 0 ? pvCpForColor(engine.pvs[0], mover) : null;
   const out: OpponentMove[] = [];
   for (const m of resp.moves) {
     const games = m.white + m.draws + m.black;
@@ -310,7 +318,7 @@ export async function pickOpponentMoves(fen: NormFen, signal?: AbortSignal): Pro
     let isMistake = false;
     if (engine && bestCp !== null) {
       const pv = findPvForMove(engine, m.uci);
-      const cp = pv ? pvCpForSide(pv) : null;
+      const cp = pv ? pvCpForColor(pv, mover) : null;
       if (cp !== null && bestCp - cp >= TUNING.mistakeThresholdPawn * 100) isMistake = true;
     }
     out.push({ san: m.san, uci: m.uci, popularityFraction: frac, isMistake });

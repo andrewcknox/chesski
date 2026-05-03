@@ -3,8 +3,7 @@ import { Board } from '../components/Board';
 import { TreeView } from '../components/TreeView';
 import { deleteSubtreeInRepertoire, getEdgesForRepertoire, getAllNodes, putEdge, resetAllSrsForRepertoire } from '../lib/storage';
 import { freshSrsState } from '../lib/srs';
-import { turnAt } from '../lib/chess';
-import { pvCpForSide } from '../lib/autosuggest';
+import { pvCpForColor } from '../lib/autosuggest';
 import { fetchCloudEval } from '../lib/lichess';
 import type { Edge, NormFen, PositionNode, Repertoire } from '../types';
 import ecoDataRaw from '../data/eco.json';
@@ -366,8 +365,7 @@ function SelectedLineEval({ line, color }: { line: LineItem; color: Repertoire['
           setEvalCp(null);
           return;
         }
-        const cp = pvCpForSide(evaluation.pvs[0]);
-        setEvalCp(cp === null ? null : turnAt(line.leafFen) === color ? cp : -cp);
+        setEvalCp(pvCpForColor(evaluation.pvs[0], color));
       } catch {
         if (cancelled) return;
         setEvalCp(null);
