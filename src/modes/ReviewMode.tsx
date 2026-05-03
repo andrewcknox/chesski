@@ -1,8 +1,18 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Color, Edge, Repertoire } from '../types';
 import { reviewGamePgn, type GameReviewResult, type ReviewMoment } from '../lib/gameReview';
 import { playMoveInRepertoire, putEdge } from '../lib/storage';
 import type { YourMovePick } from '../lib/autosuggest';
+import {
+  buildHistoryCardStates,
+  freshHistoryProgress,
+  getHistoryProgress,
+  gradeHistory,
+  isHistoryDue,
+  saveHistoryProgress,
+  type HistoryCardState,
+  type ProgressByCard,
+} from '../lib/historySrs';
 
 export function ReviewMode({ repertoire, onDataChange }: {
   repertoire: Repertoire;
@@ -14,12 +24,19 @@ export function ReviewMode({ repertoire, onDataChange }: {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<GameReviewResult | null>(null);
   const [addedIds, setAddedIds] = useState<Set<string>>(new Set());
+  const [historyProgress, setHistoryProgress] = useState<ProgressByCard>({});
+  const [historyAnswerShown, setHistoryAnswerShown] = useState(false);
+
+  useEffect(() => {
+    (async () => setHistoryProgress(await getHistoryProgress()))();
+  }, []);
 
   async function analyze() {
     setLoading(true);
     setError(null);
     setResult(null);
     setAddedIds(new Set());
+    setHistoryAnswerShown(false);
     try {
       setResult(await reviewGamePgn(repertoire, pgn, side));
     } catch (err) {
@@ -28,6 +45,17 @@ export function ReviewMode({ repertoire, onDataChange }: {
       setLoading(false);
     }
   }
+
+  async function gradeHistoryCard(cardId: string, knewIt: boolean) {
+    const current = historyProgress[cardId] ?? freshHistoryProgress();
+    const updated = { ...historyProgress, [cardId]: gradeHistory(current, knewIt ? 'known' : 'unknown') };
+    setHistoryProgress(updated);
+    setHistoryAnswerShown(false);
+    await saveHistoryProgress(updated);
+    onDataChange();
+  }
+
+  const loadingCard = chooseReviewHistoryCard(historyProgress);
 
   async function addSuggestion(moment: ReviewMoment) {
     if (!moment.suggestion) return;
@@ -69,7 +97,14 @@ export function ReviewMode({ repertoire, onDataChange }: {
 
       <div className="panel">
         <h3>Findings</h3>
-        {!result ? (
+        {loading && loadingCard ? (
+          <ReviewHistoryCard
+            cardState={loadingCard}
+            answerShown={historyAnswerShown}
+            onToggleAnswer={() => setHistoryAnswerShown(shown => !shown)}
+            onGrade={(knewIt) => void gradeHistoryCard(loadingCard.id, knewIt)}
+          />
+        ) : !result ? (
           <div className="muted">Paste a game to see where it diverged from your prep.</div>
         ) : (
           <>
@@ -93,6 +128,45 @@ export function ReviewMode({ repertoire, onDataChange }: {
             )}
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function chooseReviewHistoryCard(progressByCard: ProgressByCard): HistoryCardState | null {
+  const now = new Date();
+  const cards = buildHistoryCardStates(progressByCard, now);
+  if (cards.length === 0) return null;
+  return cards
+    .sort((a, b) => {
+      const dueDelta = Number(isHistoryDue(b.progress, now)) - Number(isHistoryDue(a.progress, now));
+      if (dueDelta !== 0) return dueDelta;
+      const newDelta = Number(!progressByCard[b.id]) - Number(!progressByCard[a.id]);
+      if (newDelta !== 0) return newDelta;
+      return a.progress.dueAt.localeCompare(b.progress.dueAt);
+    })[0];
+}
+
+function ReviewHistoryCard({ cardState, answerShown, onToggleAnswer, onGrade }: {
+  cardState: HistoryCardState;
+  answerShown: boolean;
+  onToggleAnswer: () => void;
+  onGrade: (knewIt: boolean) => void;
+}) {
+  const [before, after] = cardState.card.prompt.split('{{C1}}');
+  return (
+    <div className="cloze-card">
+      <div className="muted small">While Chesski reviews your game</div>
+      <div className="cloze-prompt">
+        {before}
+        <button className={'cloze-blank history-answer' + (answerShown ? ' revealed' : '')} onClick={onToggleAnswer} title="Click to pin answer">
+          {cardState.card.answer}
+        </button>
+        {after}
+      </div>
+      <div className="row history-actions">
+        <button className="primary" onClick={() => onGrade(true)}>Knew it</button>
+        <button onClick={() => onGrade(false)}>Couldn't pull it</button>
       </div>
     </div>
   );

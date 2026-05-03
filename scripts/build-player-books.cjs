@@ -10,6 +10,11 @@ const PLAYERS = [
   { key: 'fischer', name: 'Bobby Fischer', pgn: 'public/players/FischerRaw/Fischer.pgn', match: /fischer,\s*(robert|bobby)|fischer,\s*r/i },
   { key: 'kasparov', name: 'Garry Kasparov', pgn: 'public/players/KasparovRaw/Kasparov.pgn', match: /kasparov,\s*garry|kasparov,\s*g/i },
   { key: 'carlsen', name: 'Magnus Carlsen', pgn: 'public/players/CarlsenRaw/Carlsen.pgn', match: /carlsen,\s*magnus|carlsen,\s*m/i },
+  { key: 'anderssen', name: 'Adolf Anderssen', pgn: 'public/players/AnderssenRaw/Anderssen.pgn', match: /anderssen,\s*adolf/i },
+  { key: 'capablanca', name: 'Jose Raul Capablanca', pgn: 'public/players/CapablancaRaw/Capablanca.pgn', match: /capablanca,\s*jose\s*raul|capablanca,\s*j/i },
+  { key: 'tal', name: 'Mikhail Tal', pgn: 'public/players/TalRaw/Tal.pgn', match: /tal,\s*mihail|tal,\s*mikhail|tal,\s*m/i },
+  { key: 'botvinnik', name: 'Mikhail Botvinnik', pgn: 'public/players/BotvinnikRaw/Botvinnik.pgn', match: /botvinnik,\s*mikhail|botvinnik,\s*m/i },
+  { key: 'caruana', name: 'Fabiano Caruana', pgn: 'public/players/CaruanaRaw/Caruana.pgn', match: /caruana,\s*fabiano|caruana,\s*f/i },
 ];
 
 function normalizeFen(fen) {

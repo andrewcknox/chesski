@@ -23,6 +23,7 @@ type PillState = 'pending' | 'current' | 'done' | 'failed';
 type Phase =
   | { kind: 'setup' }
   | { kind: 'generating'; mode: SessionMode }
+  | { kind: 'line-ready'; line: GeneratedLine; mode: SessionMode }
   | { kind: 'walkthrough'; line: GeneratedLine; cursorIdx: number; mode: SessionMode; sub: Sub; lastWrongUci: string | null; sameWrongCount: number; wrongCount: number }
   | { kind: 'override-prompt'; line: GeneratedLine; cursorIdx: number; mode: SessionMode; bestSan: string; attemptedSan: string; attemptedUci: string; cpLoss: number | null; resolving: boolean; comesFrom: 'walkthrough' | 'test' }
   | { kind: 'test'; line: GeneratedLine; cursorIdx: number; gradedEdges: Set<string>; passHadError: boolean; passNumber: number; mode: SessionMode; sub: Sub; lastWrongUci: string | null; sameWrongCount: number; wrongCount: number }
@@ -158,6 +159,11 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     }
     await reload();
     onDataChange();
+    setPhase({ kind: 'line-ready', line, mode });
+  }
+
+  function studyPreparedLine(line: GeneratedLine, mode: SessionMode) {
+    setLoadingHistoryAnswerShown(false);
     setPhase({
       kind: 'walkthrough', line, cursorIdx: line.generationStartIndex, mode,
       sub: 'await', lastWrongUci: null, sameWrongCount: 0, wrongCount: 0,
@@ -510,12 +516,18 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     );
   }
 
-  if (phase.kind === 'generating') {
+  if (phase.kind === 'generating' || phase.kind === 'line-ready') {
     const loadingCard = chooseLoadingHistoryCard(loadingHistoryProgress);
     return (
       <div className="layout">
         <div className="panel" style={{ gridColumn: '1 / -1' }}>
-          <h3>Generating a new line from Lichess...</h3>
+          <div className="row">
+            <h3>{phase.kind === 'generating' ? 'Preparing a new line...' : 'Line prepared'}</h3>
+            <span className="spacer" />
+            {phase.kind === 'line-ready' && (
+              <button className="primary" onClick={() => studyPreparedLine(phase.line, phase.mode)}>Study the line</button>
+            )}
+          </div>
           {loadingCard && (
             <LoadingHistoryCard
               cardState={loadingCard}

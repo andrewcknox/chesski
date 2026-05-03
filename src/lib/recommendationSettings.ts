@@ -2,7 +2,7 @@ import { getMeta, setMeta } from './storage';
 
 const META_RECOMMENDATION_SETTINGS = 'recommendation_settings_v1';
 
-export type PlayerKey = 'self' | 'morphy' | 'fischer' | 'kasparov' | 'carlsen';
+export type PlayerKey = 'self' | 'morphy' | 'fischer' | 'kasparov' | 'carlsen' | 'anderssen' | 'capablanca' | 'tal' | 'botvinnik' | 'caruana';
 export type DatabaseSourceKey = 'masters' | 'lichess-2000';
 export type RecommendationSourceKey = PlayerKey | DatabaseSourceKey;
 
@@ -21,6 +21,11 @@ export const PLAYER_CHOICES: PlayerChoice[] = [
   { key: 'fischer', name: 'Bobby Fischer' },
   { key: 'kasparov', name: 'Garry Kasparov' },
   { key: 'carlsen', name: 'Magnus Carlsen' },
+  { key: 'anderssen', name: 'Adolf Anderssen' },
+  { key: 'capablanca', name: 'Jose Raul Capablanca' },
+  { key: 'tal', name: 'Mikhail Tal' },
+  { key: 'botvinnik', name: 'Mikhail Botvinnik' },
+  { key: 'caruana', name: 'Fabiano Caruana' },
 ];
 
 export const RECOMMENDATION_CHOICES: RecommendationSourceChoice[] = [
@@ -45,6 +50,11 @@ export const DEFAULT_RECOMMENDATION_SETTINGS: RecommendationSettings = {
     fischer: 0,
     kasparov: 0,
     carlsen: 0,
+    anderssen: 0,
+    capablanca: 0,
+    tal: 0,
+    botvinnik: 0,
+    caruana: 0,
   },
 };
 
