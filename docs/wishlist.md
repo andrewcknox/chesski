@@ -4,6 +4,8 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 
 ## Repertoire And Database Ideas
 
+- Add a Home tab that clearly answers "what opening am I studying?" and lets the user pick the current opening/repertoire before training.
+- Later, split "New opening" into its own tab with board previews so adding openings feels visual and deliberate instead of buried in settings.
 - Add a right-side Masters database view inside Chesski, similar to the Lichess opening explorer.
 - Support downloaded top-player PGN bundles stored with the app instead of depending entirely on live API search.
 - Start with a small player pack: Magnus Carlsen, Hikaru Nakamura, Fabiano Caruana, Garry Kasparov, Paul Morphy, and Bobby Fischer.
@@ -27,6 +29,11 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 
 ## Motivation And Delight
 
+- Redesign the desktop/app icon from a stronger source asset. The current skier/knight mark does not read clearly enough as either a knight or a ski pole at desktop size.
 - Add more ADD-friendly animations that make the app feel rewarding and alive without slowing down fast training.
 - Add an Anki/GitHub-style heat map for daily activity, including reviews and new cards.
 - Add opening mastery titles based on how much the user has learned inside an opening. Example: after enough Evans Gambit moves, show titles like Evans Gambit appreciator, specialist, expert, etc. Thresholds need design.
+
+## UI Clarity
+
+- Rename the main tabs and labels to match how Andy thinks about the app: History -> Trivia, Browse -> My Lines, Review -> Analyze My Game, Main repertoires -> main repertoire, and Separate repertoires -> side repertoires.
