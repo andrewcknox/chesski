@@ -44,7 +44,7 @@ interface SessionStats {
 const REVIEW_QUEUE_CAP = 10;
 const OPP_AUTOPLAY_DELAY_MS = 80;
 const BAD_FLASH_MS = 110;
-const HINT_AFTER_WRONG_COUNT = 2;
+const HINT_AFTER_WRONG_COUNT = 1;
 const OVERRIDE_AFTER_SAME_WRONG_COUNT = 3;
 
 export interface TrainModeProps {
@@ -330,15 +330,6 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
 
   function returnToAwait() {
     setPhase(p => {
-      if (p.kind === 'test' && p.sub === 'bad-flash' && p.passHadError && p.sameWrongCount < OVERRIDE_AFTER_SAME_WRONG_COUNT) {
-        return {
-          ...p,
-          cursorIdx: p.line.generationStartIndex,
-          passHadError: false,
-          passNumber: p.passNumber + 1,
-          sub: 'await',
-        };
-      }
       if (p.kind === 'walkthrough' || p.kind === 'test') {
         return { ...p, sub: 'await' };
       }
