@@ -141,7 +141,7 @@ export function Board({
   }
 
   return (
-    <div className={'board-wrap' + (flashClass ? ' ' + flashClass : '')} style={{ width: size, maxWidth: '100%' }}>
+    <div className={'board-wrap' + (flashClass ? ' ' + flashClass : '')} style={{ width: `min(${size}px, 100%)` }}>
       <Chessboard
         options={{
           position: positionFen,

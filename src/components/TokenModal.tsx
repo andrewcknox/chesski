@@ -94,15 +94,15 @@ export function TokenModal({ onSaved, manage, initialValue = '', onCancel }: Tok
           <br />
           3. Add a description (e.g. "chesski"). Leave all scopes unchecked. Click Create.
           <br />
-          4. Copy the long string starting with <code>lip_…</code> and paste it below.
+          4. Copy the long string starting with <code>lip_...</code> and paste it below.
         </p>
-        <div className="row" style={{ marginTop: 12 }}>
+        <div className="row token-input-row">
           <input
             type={show ? 'text' : 'password'}
             value={token}
             onChange={e => setToken(e.target.value)}
-            placeholder="lip_…"
-            style={{ flex: 1, minWidth: 240 }}
+            placeholder="lip_..."
+            className="token-input"
             autoFocus
             autoComplete="off"
             onKeyDown={e => { if (e.key === 'Enter') void save(); }}
@@ -136,7 +136,7 @@ export function TokenModal({ onSaved, manage, initialValue = '', onCancel }: Tok
                 Sign in
               </button>
             </div>
-            <div className="row">
+            <div className="row token-account-form">
               <input
                 value={username}
                 onChange={e => setUsername(e.target.value)}

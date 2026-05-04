@@ -226,7 +226,7 @@ function App() {
         <div className="panel">
           <h3>Import an existing backup</h3>
           <div className="row">
-            <button onClick={handleImportClick}>Import JSON…</button>
+            <button onClick={handleImportClick}>Import JSON...</button>
             <input type="file" accept="application/json" ref={fileInputRef} onChange={handleImportFile} style={{ display: 'none' }} />
           </div>
         </div>
@@ -236,23 +236,6 @@ function App() {
 
   return (
     <div className="app">
-      <div className="row" style={{ marginBottom: 10 }}>
-        <strong>Repertoire:</strong>
-        <select value={activeRepId ?? ''} onChange={e => setActiveRepId(e.target.value)}>
-          {repertoires.map(r => (
-            <option key={r.id} value={r.id}>{r.name} ({r.color === 'w' ? 'White' : 'Black'})</option>
-          ))}
-        </select>
-        <button onClick={() => activeRepId && handleDelete(activeRepId)} disabled={!activeRepId}>Delete</button>
-        <span className="spacer" />
-        <details style={{ marginLeft: 8 }}>
-          <summary style={{ cursor: 'pointer', color: 'var(--accent)' }}>+ New repertoire</summary>
-          <div style={{ marginTop: 8 }}>
-            <NewRepertoireCreator compact repertoires={repertoires} onCreated={handleCreated} />
-          </div>
-        </details>
-      </div>
-
       <div className="tabs">
         <button className={'tab' + (tab === 'home' ? ' active' : '')} onClick={() => setTab('home')}>
           Home
@@ -284,8 +267,13 @@ function App() {
           Account
         </button>
         <span className="spacer" />
-        <button className="tab" onClick={handleExport} title="Download a Chesski JSON backup">Backup</button>
-        <button className="tab" onClick={handleImportClick} title="Restore a Chesski JSON backup">Restore</button>
+        <details className="nav-tools">
+          <summary>Data</summary>
+          <div className="nav-tools-menu">
+            <button onClick={handleExport} title="Download a Chesski JSON backup">Backup</button>
+            <button onClick={handleImportClick} title="Restore a Chesski JSON backup">Restore</button>
+          </div>
+        </details>
         <input type="file" accept="application/json" ref={fileInputRef} onChange={handleImportFile} style={{ display: 'none' }} />
       </div>
 
@@ -312,16 +300,24 @@ function App() {
             />
           )}
           {tab === 'repertoires' && (
-            <RepertoiresMode
-              repertoires={repertoires}
-              activeRepId={activeRepId}
-              onSelect={setActiveRepId}
-              onOpen={handleOpenRepertoire}
-              onCreated={handleCreated}
-              onChanged={async () => { await reloadRepertoires(); onDataChange(); }}
-              onDelete={handleDelete}
-              onNewOpening={() => setTab('new-opening')}
-            />
+            <>
+              <RepertoiresMode
+                repertoires={repertoires}
+                activeRepId={activeRepId}
+                onSelect={setActiveRepId}
+                onOpen={handleOpenRepertoire}
+                onCreated={handleCreated}
+                onChanged={async () => { await reloadRepertoires(); onDataChange(); }}
+                onDelete={handleDelete}
+                onNewOpening={() => setTab('new-opening')}
+              />
+              <details className="collapsible custom-tools-panel">
+                <summary>Custom / import tools</summary>
+                <div className="panel">
+                  <NewRepertoireCreator repertoires={repertoires} onCreated={handleCreated} />
+                </div>
+              </details>
+            </>
           )}
           {tab === 'history' && <HistoryMode onProgressChange={onDataChange} />}
           {tab === 'settings' && <SettingsMode />}
@@ -382,7 +378,7 @@ function HomeMode({ repertoires, activeRepId, refreshKey, onChoose }: {
           <h3>Current study</h3>
           <div className="home-current-title">{activeRep.name}</div>
           <div className="muted small">
-            {openingLabel(activeRep)} · {activeRep.color === 'w' ? 'White' : 'Black'} · {repKindLabel(activeRep)}
+            {openingLabel(activeRep)} - {activeRep.color === 'w' ? 'White' : 'Black'} - {repKindLabel(activeRep)}
           </div>
           <div className="home-stat-grid">
             <StatBlock value={activeStats?.dueMoves ?? 0} label="due" />
@@ -466,7 +462,7 @@ function HomeRepertoireCard({ rep, active, stats, onChoose }: {
     <div className={'home-rep-card' + (active ? ' active' : '')}>
       <div className="home-rep-main">
         <div className="home-rep-title">{rep.name}</div>
-        <div className="muted small">{openingLabel(rep)} · {rep.color === 'w' ? 'White' : 'Black'}</div>
+        <div className="muted small">{openingLabel(rep)} - {rep.color === 'w' ? 'White' : 'Black'}</div>
       </div>
       <div className="home-mini-stats">
         <span><strong>{stats?.dueMoves ?? 0}</strong> due</span>

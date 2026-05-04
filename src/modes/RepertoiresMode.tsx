@@ -179,7 +179,7 @@ function ProjectGroup({
                 <button className="rep-title-button" onClick={() => onSelect(rep.id)}>{rep.name}</button>
               )}
               <div className="muted small">
-                {rep.color === 'w' ? 'White' : 'Black'} · {counts[rep.id] ?? 0} moves · {(rep.projectKind ?? 'standard') === 'siloed' ? 'separate' : 'main'}
+                {rep.color === 'w' ? 'White' : 'Black'} - {counts[rep.id] ?? 0} moves - {(rep.projectKind ?? 'standard') === 'siloed' ? 'separate' : 'main'}
               </div>
             </div>
             <div className="rep-card-actions">

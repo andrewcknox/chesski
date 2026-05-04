@@ -114,7 +114,7 @@ export function HistoryMode({ onProgressChange }: HistoryModeProps) {
               <span>{item.card.answer}</span>
               <span className="spacer" />
               <span className="muted small">
-                {item.progress.reps > 0 ? `${item.progress.reps}x · ${nextDueLabel(item.progress, now)}` : 'new'}
+                {item.progress.reps > 0 ? `${item.progress.reps}x - ${nextDueLabel(item.progress, now)}` : 'new'}
               </span>
             </div>
           ))}

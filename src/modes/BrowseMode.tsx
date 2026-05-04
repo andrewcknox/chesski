@@ -264,7 +264,7 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
           onSizeChange={onBoardSizeChange}
         />
         {selectedLine && (
-          <div className="panel" style={{ marginTop: 10 }}>
+          <div className="panel selected-line-panel">
             <h3>Selected line</h3>
             <div className="small mono" style={{ wordBreak: 'break-word' }}>{selectedLine.fullSan || '(repertoire root)'}</div>
             <div className="small muted" style={{ marginTop: 4 }}>
@@ -291,7 +291,7 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
 
       <div>
         <div className="panel">
-          <h3>Lines — {repertoire.name} ({repertoire.color === 'w' ? 'White' : 'Black'})</h3>
+          <h3>Lines - {repertoire.name} ({repertoire.color === 'w' ? 'White' : 'Black'})</h3>
           {lines.length === 0 ? (
             <div className="muted small">No lines yet. Run a Train session to start populating the repertoire.</div>
           ) : (
@@ -419,11 +419,11 @@ function OpeningGroupView({ group, selectedLeafFen, onSelect, repertoireColor, b
             />
           </div>
         )}
-        <span className="mono small muted" style={{ minWidth: 36 }}>{group.eco ?? '—'}</span>
-        <strong>{group.name}</strong>
-        <span className="muted small">· {group.lines.length} line{group.lines.length === 1 ? '' : 's'}</span>
+        <span className="folder-eco mono small muted">{group.eco ?? '-'}</span>
+        <strong className="folder-title">{group.name}</strong>
+        <span className="folder-count muted small">{group.lines.length} line{group.lines.length === 1 ? '' : 's'}</span>
         <span className="spacer" />
-        <span className="muted small">{open ? '▼' : '▶'}</span>
+        <span className="folder-toggle muted small">{open ? 'v' : '>'}</span>
       </div>
       {open && (
         <div className="opening-lines-grid">
@@ -448,12 +448,8 @@ function LineCard({ line, selected, onClick, boardSize }: { line: LineItem; sele
   const orientation: 'white' | 'black' = lastEdge?.mover === 'w' ? 'black' : 'white';
   return (
     <div
+      className={'line-card' + (selected ? ' selected' : '')}
       onClick={onClick}
-      style={{
-        padding: 6, borderRadius: 4, cursor: 'pointer',
-        border: '1px solid ' + (selected ? 'var(--accent)' : 'var(--border)'),
-        background: selected ? 'var(--accent-dim)' : 'var(--bg-elev)',
-      }}
     >
       <div className="line-card-board" style={{ pointerEvents: 'none' }}>
         <Board
@@ -465,7 +461,7 @@ function LineCard({ line, selected, onClick, boardSize }: { line: LineItem; sele
           showNotation={false}
         />
       </div>
-      <div className="mono small" style={{ marginTop: 6, wordBreak: 'break-word' }}>
+      <div className="line-card-copy mono small">
         {line.extensionSan || <span className="muted">(at the named position)</span>}
       </div>
     </div>
