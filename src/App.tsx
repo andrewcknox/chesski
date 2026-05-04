@@ -4,6 +4,7 @@ import { BrowseMode } from './modes/BrowseMode';
 import { ReviewMode } from './modes/ReviewMode';
 import { RepertoiresMode } from './modes/RepertoiresMode';
 import { NewOpeningMode } from './modes/NewOpeningMode';
+import { GameImportMode } from './modes/GameImportMode';
 import { HistoryMode } from './modes/HistoryMode';
 import { AccountMode } from './modes/AccountMode';
 import { SettingsMode } from './modes/SettingsMode';
@@ -22,7 +23,7 @@ import { isDue } from './lib/srs';
 import { getHistoryDueCount } from './lib/historySrs';
 import type { Color, Repertoire } from './types';
 
-type Tab = 'home' | 'train' | 'browse' | 'review' | 'new-opening' | 'repertoires' | 'history' | 'settings' | 'account';
+type Tab = 'home' | 'train' | 'browse' | 'review' | 'game-import' | 'new-opening' | 'repertoires' | 'history' | 'settings' | 'account';
 const META_LAST_REP = 'last_repertoire_id';
 const META_BOARD_SIZE = 'board_size';
 const DEFAULT_BOARD_SIZE = 640;
@@ -250,6 +251,9 @@ function App() {
         <button className={'tab' + (tab === 'review' ? ' active' : '')} onClick={() => setTab('review')}>
           Analyze My Game
         </button>
+        <button className={'tab' + (tab === 'game-import' ? ' active' : '')} onClick={() => setTab('game-import')}>
+          My Games
+        </button>
         <button className={'tab' + (tab === 'new-opening' ? ' active' : '')} onClick={() => setTab('new-opening')}>
           New Opening
         </button>
@@ -290,6 +294,14 @@ function App() {
           {tab === 'train' && <TrainMode repertoire={activeRep} onDataChange={onDataChange} refreshKey={refreshKey} boardSize={boardSize} onBoardSizeChange={setBoardSize} />}
           {tab === 'browse' && <BrowseMode repertoire={activeRep} onDataChange={onDataChange} refreshKey={refreshKey} boardSize={boardSize} onBoardSizeChange={setBoardSize} />}
           {tab === 'review' && <ReviewMode repertoire={activeRep} onDataChange={onDataChange} />}
+          {tab === 'game-import' && (
+            <GameImportMode
+              repertoires={repertoires}
+              activeRepId={activeRepId}
+              onChanged={async () => { await reloadRepertoires(); onDataChange(); }}
+              onOpen={handleOpenRepertoire}
+            />
+          )}
           {tab === 'new-opening' && (
             <NewOpeningMode
               repertoires={repertoires}

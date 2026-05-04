@@ -13,6 +13,7 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 - Let users have more than one approved response in the same position, with study modes such as main line, sideline, or any prepared move.
 - Add fully separate siloed repertoire projects that can intentionally contradict other repertoires without being treated as conflicts. Example: one serious tournament repertoire and one experimental "play like Morphy" repertoire can both exist with different answers to the same position.
 - Import a user's game history, infer the lines they actually play, and flag repertoire moves as bad, improvable, acceptable, or optimal.
+- After the initial Chess.com/PGN repertoire import flow works, let users add their Lichess username as another source for importing their own games.
 - Add a "Punisher" mode: find common opening blunders that occur after positions already in the user's repertoire, prioritize moves with very high win rates for the user's side, and confirm the traps with Stockfish before teaching them.
 - Improve drag-reordering for "learn from these players/sources": while the user is holding an item, the other items should move live so the final order is visible before release.
 
