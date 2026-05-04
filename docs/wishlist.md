@@ -5,9 +5,11 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 ## Repertoire And Database Ideas
 
 - Replace the remaining top-right "+ New repertoire" advanced control with a clearer custom-import/tools path. The normal opening flow now lives in New Opening, but FEN/PGN/clone creation still needs a less awkward home.
+- Fix the My Lines tab regression. It used to work cleanly, but it is now badly broken and needs a focused repair pass.
 - In My Lines, when the user selects a line and it appears on the large board, show actions for "Review this prep" and "Learn a new line from here."
 - Add a right-side Masters database view inside Chesski, similar to the Lichess opening explorer.
 - Replace checkbox-style default-opening continuation picking with an immersive board-first flow: show the position, let the user play the move they know and want in their prep, validate it against pre-approved engine-checked/master-supported continuations, then return to earlier unresolved branches until the repertoire is filled in.
+- After a user selects a new opening to learn, bring them to the board and simulate the opening with them so Chesski can infer what prep they already know. This likely needs a stored database of opponent responses because live engine/API calls are too slow for a smooth setup flow.
 - Support downloaded top-player PGN bundles stored with the app instead of depending entirely on live API search.
 - Start with a small player pack: Magnus Carlsen, Hikaru Nakamura, Fabiano Caruana, Garry Kasparov, Paul Morphy, and Bobby Fischer.
 - Add a stacked "play like these players" recommendation mode. For a position, check the user's priority players in order and prefer a move that player used successfully from the exact position. If the first player has no matching win or game, check the next player, then fall back to Masters data and engine evaluation.
@@ -20,6 +22,7 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 
 ## Accounts And Sync
 
+- Fix account isolation. Separate accounts currently do not feel truly separate; importing personal games can report conflicts with stored database/repertoire data even when the account has not added lines yet.
 - True cross-device sync still needs a hosted backend. The current local vault is file-backed and durable on this computer, but it does not follow the user across devices.
 
 ## Training And Review
