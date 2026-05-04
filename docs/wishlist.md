@@ -7,6 +7,7 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 - Replace the remaining top-right "+ New repertoire" advanced control with a clearer custom-import/tools path. The normal opening flow now lives in New Opening, but FEN/PGN/clone creation still needs a less awkward home.
 - In My Lines, when the user selects a line and it appears on the large board, show actions for "Review this prep" and "Learn a new line from here."
 - Add a right-side Masters database view inside Chesski, similar to the Lichess opening explorer.
+- Replace checkbox-style default-opening continuation picking with an immersive board-first flow: show the position, let the user play the move they know and want in their prep, validate it against pre-approved engine-checked/master-supported continuations, then return to earlier unresolved branches until the repertoire is filled in.
 - Support downloaded top-player PGN bundles stored with the app instead of depending entirely on live API search.
 - Start with a small player pack: Magnus Carlsen, Hikaru Nakamura, Fabiano Caruana, Garry Kasparov, Paul Morphy, and Bobby Fischer.
 - Add a stacked "play like these players" recommendation mode. For a position, check the user's priority players in order and prefer a move that player used successfully from the exact position. If the first player has no matching win or game, check the next player, then fall back to Masters data and engine evaluation.

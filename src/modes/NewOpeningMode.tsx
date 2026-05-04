@@ -59,10 +59,15 @@ export function NewOpeningMode({
     opening,
     ...openingPreview(opening),
   })), []);
-  const [selectedKey, setSelectedKey] = useState(openings[0]?.opening.key ?? '');
+  const [catalogColor, setCatalogColor] = useState<Color>(() => {
+    const active = repertoires.find(rep => rep.id === activeRepId);
+    return active?.color ?? 'w';
+  });
+  const visibleOpenings = useMemo(() => openings.filter(item => item.opening.color === catalogColor), [catalogColor, openings]);
+  const [selectedKey, setSelectedKey] = useState(visibleOpenings[0]?.opening.key ?? '');
   const selected = selectedKey === CUSTOM_OPENING_KEY
     ? null
-    : openings.find(item => item.opening.key === selectedKey) ?? openings[0] ?? null;
+    : visibleOpenings.find(item => item.opening.key === selectedKey) ?? visibleOpenings[0] ?? null;
   const [mode, setMode] = useState<FlowMode>(startOnly || repertoires.length === 0 ? 'new' : 'add');
   const [targetId, setTargetId] = useState(activeRepId ?? repertoires[0]?.id ?? '');
   const [name, setName] = useState('');
@@ -80,6 +85,13 @@ export function NewOpeningMode({
     if (!selected) return repertoires;
     return repertoires.filter(rep => rep.color === selected.opening.color);
   }, [customColor, repertoires, selected, selectedKey]);
+
+  useEffect(() => {
+    setCustomColor(catalogColor);
+    if (selectedKey === CUSTOM_OPENING_KEY) return;
+    if (visibleOpenings.some(item => item.opening.key === selectedKey)) return;
+    setSelectedKey(visibleOpenings[0]?.opening.key ?? '');
+  }, [catalogColor, selectedKey, visibleOpenings]);
 
   useEffect(() => {
     if (startOnly || repertoires.length === 0) setMode('new');
@@ -280,18 +292,24 @@ export function NewOpeningMode({
         <div className="opening-toolbar">
           <div>
             <h3>New Opening</h3>
-            <div className="muted small">Pick a starting point, then create a repertoire or add it to one you already study.</div>
+            <div className="muted small">Pick the side you are preparing, then choose a starting point.</div>
           </div>
-          {!startOnly && repertoires.length > 0 && (
+          <div className="opening-toolbar-controls">
             <div className="segmented">
-              <button className={mode === 'new' ? 'active' : ''} onClick={() => setMode('new')}>New repertoire</button>
-              <button className={mode === 'add' ? 'active' : ''} onClick={() => setMode('add')}>Add to existing</button>
+              <button className={catalogColor === 'w' ? 'active' : ''} onClick={() => setCatalogColor('w')}>White openings</button>
+              <button className={catalogColor === 'b' ? 'active' : ''} onClick={() => setCatalogColor('b')}>Black openings</button>
             </div>
-          )}
+            {!startOnly && repertoires.length > 0 && (
+              <div className="segmented">
+                <button className={mode === 'new' ? 'active' : ''} onClick={() => setMode('new')}>New repertoire</button>
+                <button className={mode === 'add' ? 'active' : ''} onClick={() => setMode('add')}>Add to existing</button>
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="opening-catalog">
-          {openings.map(item => (
+          {visibleOpenings.map(item => (
             <button
               key={item.opening.key}
               className={'opening-card' + (item.opening.key === selectedKey ? ' selected' : '')}

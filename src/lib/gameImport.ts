@@ -144,10 +144,13 @@ export async function buildImportDraft(options: ImportOptions): Promise<ImportDr
 }
 
 async function fetchChessComGames(options: ImportOptions): Promise<ParsedImportGame[]> {
-  const username = options.username.trim().toLowerCase();
+  const username = normalizeChessComUsername(options.username);
   if (!username) throw new Error('Enter a Chess.com username.');
   options.onStatus?.('Finding Chess.com archives...');
   const archiveRes = await fetch(`https://api.chess.com/pub/player/${encodeURIComponent(username)}/games/archives`, { signal: options.signal });
+  if (archiveRes.status === 404) {
+    throw new Error(`Chess.com could not find public game archives for "${username}". Check the spelling, paste just the profile name, or upload a PGN instead.`);
+  }
   if (!archiveRes.ok) throw new Error(`Chess.com archives returned ${archiveRes.status}. If the browser blocks this, upload a PGN instead.`);
   const archiveData = (await archiveRes.json()) as { archives?: string[] };
   const archives = archiveData.archives ?? [];
@@ -227,12 +230,19 @@ function splitPgn(pgn: string): string[] {
 }
 
 function gameMatchesOptions(game: ParsedImportGame, options: ImportOptions): boolean {
-  const username = options.username.trim().toLowerCase();
+  const username = normalizeChessComUsername(options.username);
   if (username) {
     const sideName = options.side === 'w' ? game.white : game.black;
     if (sideName.trim().toLowerCase() !== username) return false;
   }
   return options.speeds.includes(game.speed as ImportSpeed);
+}
+
+function normalizeChessComUsername(value: string): string {
+  const trimmed = value.trim();
+  const match = trimmed.match(/chess\.com\/(?:member|player|stats|games)\/([^/?#\s]+)/i);
+  const raw = match?.[1] ?? trimmed.replace(/^@/, '');
+  return raw.trim().toLowerCase();
 }
 
 function findGamesAtRoot(games: ParsedImportGame[], opening: CuratedOpening): RootGame[] {

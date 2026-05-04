@@ -354,6 +354,12 @@ a { color: var(--accent); }
   align-items: flex-start;
   gap: 12px;
 }
+.opening-toolbar-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .opening-toolbar h3 {
   margin: 0 0 4px;
   font-size: 13px;
@@ -1361,6 +1367,7 @@ a { color: var(--accent); }
   .layout { grid-template-columns: 1fr; }
   .new-opening-layout { grid-template-columns: 1fr; }
   .opening-toolbar { display: grid; }
+  .opening-toolbar-controls { justify-content: flex-start; }
   .opening-action-panel { position: static; }
   .home-current { grid-template-columns: 1fr; }
   .home-picker { grid-template-columns: 1fr; }

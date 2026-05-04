@@ -14,7 +14,7 @@ export interface CuratedOpening extends OpeningLine {
 
 export type ResolvedOpeningLine = OpeningLine & { color: Color };
 
-export const CURATED_OPENINGS: CuratedOpening[] = [
+const BASE_CURATED_OPENINGS: CuratedOpening[] = [
   {
     key: 'italian-w',
     name: 'Italian Game',
@@ -747,6 +747,11 @@ export const CURATED_OPENINGS: CuratedOpening[] = [
   },
 ];
 
+export const CURATED_OPENINGS: CuratedOpening[] = [
+  ...BASE_CURATED_OPENINGS,
+  ...BASE_CURATED_OPENINGS.map(opening => mirrorOpeningForColor(opening, oppositeColor(opening.color))),
+];
+
 export function findOpening(key: string): ResolvedOpeningLine | undefined {
   for (const opening of CURATED_OPENINGS) {
     const found = findLine(opening, key, opening.color);
@@ -773,4 +778,25 @@ function flattenLine(line: OpeningLine, color: Color): ResolvedOpeningLine[] {
     { ...line, color },
     ...(line.continuations ?? []).flatMap(child => flattenLine(child, color)),
   ];
+}
+
+function mirrorOpeningForColor(opening: CuratedOpening, color: Color): CuratedOpening {
+  return {
+    ...mirrorLine(opening, color),
+    color,
+    name: `${color === 'w' ? 'White' : 'Black'} vs ${opening.name}`,
+  };
+}
+
+function mirrorLine(line: OpeningLine, color: Color): OpeningLine {
+  return {
+    key: `${line.key}-as-${color}`,
+    name: line.name,
+    moves: line.moves,
+    continuations: line.continuations?.map(child => mirrorLine(child, color)),
+  };
+}
+
+function oppositeColor(color: Color): Color {
+  return color === 'w' ? 'b' : 'w';
 }
