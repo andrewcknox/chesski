@@ -15,6 +15,21 @@ import {
   type RecommendationSettings,
 } from '../lib/recommendationSettings';
 
+const ALGORITHM_GUIDE_STEPS = [
+  {
+    title: 'Great Players',
+    body: 'Which great players do you want to take the games of? Put your own games, classic players, masters, or Lichess 2000+ in the order Chesski should consult them.',
+  },
+  {
+    title: 'Move Selection',
+    body: 'Chesski checks those sources in order, looks for moves with practical support, and keeps your repertoire to one clear continuation at each of your decision points.',
+  },
+  {
+    title: 'Quality Guard',
+    body: 'Player-line quality guard is the new name for the old engine-check idea. If a player-book move loses too much, Chesski asks the engine and master data for a cleaner continuation.',
+  },
+];
+
 export function SettingsMode() {
   const [settings, setSettingsState] = useState<RecommendationSettings>(DEFAULT_RECOMMENDATION_SETTINGS);
   const [loaded, setLoaded] = useState(false);
@@ -23,6 +38,8 @@ export function SettingsMode() {
   const [importName, setImportName] = useState('');
   const [importing, setImporting] = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
+  const [guideStep, setGuideStep] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -150,10 +167,30 @@ export function SettingsMode() {
 
   return (
     <div className="layout settings-layout">
+      {guideOpen && (
+        <AlgorithmGuide
+          step={guideStep}
+          onPrevious={() => setGuideStep(step => Math.max(0, step - 1))}
+          onNext={() => setGuideStep(step => Math.min(ALGORITHM_GUIDE_STEPS.length - 1, step + 1))}
+          onClose={() => setGuideOpen(false)}
+        />
+      )}
+
+      <div className="panel algorithm-guide-panel">
+        <img src="/chesski-256.png" alt="" className="algorithm-guide-sprite" />
+        <div>
+          <h3>Algorithm guide</h3>
+          <div className="muted small settings-copy">
+            A quick click-through tour of source order, move selection, and the player-line quality guard.
+          </div>
+        </div>
+        <button onClick={() => { setGuideStep(0); setGuideOpen(true); }}>Guide me</button>
+      </div>
+
       <div className="panel">
         <h3>Opening choices</h3>
         <div className="muted small settings-copy">
-          Drag sources into the order you want Chesski to check. Imported PGNs show up here as your own stealable source. Player moves need a positive record and then pass the engine check below.
+          Drag sources into the order you want Chesski to check. Imported PGNs show up here as your own player-book source. Player moves need a positive record and then pass the quality guard below.
         </div>
         <div className="settings-drop-grid">
           <div
@@ -209,7 +246,7 @@ export function SettingsMode() {
         </div>
         <div className="settings-threshold-row">
           <div>
-            <strong>Stolen line engine check</strong>
+            <strong>Player-line quality guard</strong>
             <div className="muted small">Applies only to newly generated player-book lines.</div>
           </div>
           <select
@@ -267,6 +304,42 @@ export function SettingsMode() {
         ) : (
           <div className="muted">Loading player books...</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function AlgorithmGuide({ step, onPrevious, onNext, onClose }: {
+  step: number;
+  onPrevious: () => void;
+  onNext: () => void;
+  onClose: () => void;
+}) {
+  const current = ALGORITHM_GUIDE_STEPS[step];
+  const isLast = step === ALGORITHM_GUIDE_STEPS.length - 1;
+
+  return (
+    <div className="modal-backdrop soft">
+      <div className="modal algorithm-guide-modal">
+        <div className="algorithm-dialogue-head">
+          <img src="/chesski-256.png" alt="" className="algorithm-dialogue-sprite" />
+          <div>
+            <h2>{current.title}</h2>
+            <p>{current.body}</p>
+          </div>
+        </div>
+        <div className="algorithm-dialogue-progress">
+          {ALGORITHM_GUIDE_STEPS.map((_, index) => (
+            <span key={index} className={index === step ? 'active' : ''} />
+          ))}
+        </div>
+        <div className="row algorithm-dialogue-actions">
+          <button onClick={onPrevious} disabled={step === 0}>Back</button>
+          <button className="primary" onClick={isLast ? onClose : onNext}>
+            {isLast ? 'Done' : 'Next'}
+          </button>
+          <button onClick={onClose}>Skip</button>
+        </div>
       </div>
     </div>
   );

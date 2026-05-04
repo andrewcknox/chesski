@@ -2,6 +2,7 @@ import { getLichessToken, setLichessToken } from './lichess';
 import { ensureDefaultMainRepertoires, exportAll, getMeta, importAll, setMeta, type ExportData } from './storage';
 import { getHistoryProgress, saveHistoryProgress, type ProgressByCard } from './historySrs';
 import { loadPersistentVault, savePersistentVault, type PersistentVault } from './localVault';
+import { markFirstRunOnboardingPending } from './onboarding';
 
 const META_ACCOUNTS = 'local_accounts_v1';
 const META_CURRENT_ACCOUNT = 'current_account_v1';
@@ -212,6 +213,7 @@ export async function createAccount(username: string, password: string): Promise
   };
   await setAccounts([...accounts, account]);
   await setCurrentAccountId(account.id);
+  await markFirstRunOnboardingPending();
   return accountSummary(account);
 }
 

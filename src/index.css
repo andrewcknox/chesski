@@ -1235,6 +1235,58 @@ a { color: var(--accent); }
 .settings-layout {
   grid-template-columns: minmax(360px, 680px) minmax(260px, 1fr);
 }
+.algorithm-guide-panel {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+.algorithm-guide-panel h3 {
+  margin-bottom: 4px;
+}
+.algorithm-guide-panel .settings-copy {
+  margin-bottom: 0;
+}
+.algorithm-guide-sprite,
+.algorithm-dialogue-sprite,
+.onboarding-mascot {
+  width: 52px;
+  height: 52px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+.algorithm-guide-modal {
+  max-width: 560px;
+}
+.algorithm-dialogue-head,
+.onboarding-mascot-row {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+.algorithm-dialogue-head p {
+  line-height: 1.55;
+}
+.algorithm-dialogue-progress {
+  display: flex;
+  gap: 6px;
+  margin: 16px 0 12px 66px;
+}
+.algorithm-dialogue-progress span {
+  width: 32px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+}
+.algorithm-dialogue-progress span.active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.algorithm-dialogue-actions {
+  justify-content: flex-end;
+}
 .settings-copy {
   margin-bottom: 12px;
   line-height: 1.5;
@@ -1433,6 +1485,32 @@ a { color: var(--accent); }
   background: var(--border);
   flex: 1;
 }
+.onboarding-modal {
+  max-width: 600px;
+}
+.onboarding-choice-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 18px;
+}
+.onboarding-choice-grid button {
+  min-height: 46px;
+}
+.onboarding-starter-copy {
+  margin-top: 10px;
+}
+.onboarding-inline-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: rgba(74, 144, 226, 0.14);
+  border: 1px solid rgba(74, 144, 226, 0.45);
+  border-radius: 6px;
+}
 
 /* Progress pills under board */
 .progress-pills {
@@ -1555,6 +1633,16 @@ details.collapsible[open] summary { color: var(--text); margin-bottom: 8px; }
   .token-account-form input,
   .token-account-form button {
     min-width: 100%;
+  }
+  .algorithm-guide-panel,
+  .onboarding-choice-grid {
+    grid-template-columns: 1fr;
+  }
+  .algorithm-dialogue-progress {
+    margin-left: 0;
+  }
+  .onboarding-inline-note {
+    display: grid;
   }
   .modal {
     padding: 18px;

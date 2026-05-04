@@ -21,6 +21,11 @@ import {
 import { getLichessToken } from './lib/lichess';
 import { isDue } from './lib/srs';
 import { getHistoryDueCount } from './lib/historySrs';
+import {
+  addStarterOpeningSet,
+  completeFirstRunOnboarding,
+  getFirstRunOnboardingState,
+} from './lib/onboarding';
 import type { Color, Repertoire } from './types';
 
 type Tab = 'home' | 'train' | 'browse' | 'review' | 'game-import' | 'new-opening' | 'repertoires' | 'history' | 'settings' | 'account';
@@ -35,6 +40,10 @@ function App() {
   const [historyDueCount, setHistoryDueCount] = useState(0);
   const [repertoires, setRepertoires] = useState<Repertoire[]>([]);
   const [activeRepId, setActiveRepId] = useState<string | null>(null);
+  const [onboardingChecked, setOnboardingChecked] = useState(false);
+  const [showFirstRunOnboarding, setShowFirstRunOnboarding] = useState(false);
+  const [starterNotice, setStarterNotice] = useState(false);
+  const [importNotice, setImportNotice] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const accountSyncTimerRef = useRef<number | null>(null);
 
@@ -104,6 +113,18 @@ function App() {
   useEffect(() => { void refreshDueCount(); void refreshHistoryDueCount(); }, [refreshDueCount, refreshHistoryDueCount, refreshKey]);
 
   useEffect(() => {
+    if (!hasToken || !tokenChecked || onboardingChecked || repertoires.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const state = await getFirstRunOnboardingState();
+      if (cancelled) return;
+      setShowFirstRunOnboarding(state === 'pending');
+      setOnboardingChecked(true);
+    })();
+    return () => { cancelled = true; };
+  }, [hasToken, tokenChecked, onboardingChecked, repertoires.length]);
+
+  useEffect(() => {
     if (activeRepId) void setMeta(META_LAST_REP, activeRepId);
   }, [activeRepId]);
 
@@ -133,6 +154,7 @@ function App() {
       const tok = await getLichessToken();
       setHasToken(!!tok);
       await reloadRepertoires();
+      setOnboardingChecked(false);
       onDataChange();
     })();
   }, [reloadRepertoires, onDataChange]);
@@ -160,6 +182,32 @@ function App() {
     if (!ok) return;
     await deleteRepertoire(id);
     await reloadRepertoires();
+    onDataChange();
+  }
+
+  async function handleFirstRunNo() {
+    const starter = await addStarterOpeningSet();
+    await reloadRepertoires();
+    if (starter.activeRepertoireId) setActiveRepId(starter.activeRepertoireId);
+    setShowFirstRunOnboarding(false);
+    setStarterNotice(true);
+    setImportNotice(false);
+    setTab('train');
+    onDataChange();
+  }
+
+  async function handleFirstRunYes() {
+    await completeFirstRunOnboarding();
+    setShowFirstRunOnboarding(false);
+    setStarterNotice(false);
+    setImportNotice(true);
+    setTab('game-import');
+    onDataChange();
+  }
+
+  async function handleFirstRunSkip() {
+    await completeFirstRunOnboarding();
+    setShowFirstRunOnboarding(false);
     onDataChange();
   }
 
@@ -265,7 +313,7 @@ function App() {
           <span className={'badge' + (historyDueCount === 0 ? ' zero' : '')}>{historyDueCount}</span>
         </button>
         <button className={'tab' + (tab === 'settings' ? ' active' : '')} onClick={() => setTab('settings')}>
-          Settings
+          Algorithm
         </button>
         <button className={'tab' + (tab === 'account' ? ' active' : '')} onClick={() => setTab('account')}>
           Account
@@ -280,6 +328,28 @@ function App() {
         </details>
         <input type="file" accept="application/json" ref={fileInputRef} onChange={handleImportFile} style={{ display: 'none' }} />
       </div>
+
+      {showFirstRunOnboarding && (
+        <FirstRunOnboarding
+          onNo={handleFirstRunNo}
+          onYes={handleFirstRunYes}
+          onSkip={handleFirstRunSkip}
+        />
+      )}
+
+      {starterNotice && tab === 'train' && (
+        <div className="onboarding-inline-note">
+          <span>OK, we're going to start with teaching you one white opening first.</span>
+          <button onClick={() => setStarterNotice(false)}>Dismiss</button>
+        </div>
+      )}
+
+      {importNotice && tab === 'game-import' && (
+        <div className="onboarding-inline-note">
+          <span>Start by importing games for one color. After Chesski finds the frontiers of your prep, tune the player sources in Algorithm.</span>
+          <button onClick={() => setImportNotice(false)}>Dismiss</button>
+        </div>
+      )}
 
       {activeRep ? (
         <>
@@ -338,6 +408,58 @@ function App() {
       ) : (
         <div className="panel">Select a repertoire above.</div>
       )}
+    </div>
+  );
+}
+
+function FirstRunOnboarding({ onNo, onYes, onSkip }: {
+  onNo: () => Promise<void>;
+  onYes: () => Promise<void>;
+  onSkip: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState<'no' | 'yes' | 'skip' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run(kind: 'no' | 'yes' | 'skip', action: () => Promise<void>) {
+    setBusy(kind);
+    setError(null);
+    try {
+      await action();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop soft">
+      <div className="modal onboarding-modal">
+        <div className="onboarding-mascot-row">
+          <img src="/chesski-256.png" alt="" className="onboarding-mascot" />
+          <div>
+            <h2>Do you know any chess openings?</h2>
+            <p className="muted">
+              Chesski can either start teaching you a prepared starter set, or help you turn your own games into a repertoire.
+            </p>
+          </div>
+        </div>
+        <div className="onboarding-choice-grid">
+          <button className="primary" onClick={() => void run('no', onNo)} disabled={!!busy}>
+            {busy === 'no' ? 'Preparing...' : 'No, teach me'}
+          </button>
+          <button onClick={() => void run('yes', onYes)} disabled={!!busy}>
+            {busy === 'yes' ? 'Opening My Games...' : 'Yes, I know some'}
+          </button>
+          <button onClick={() => void run('skip', onSkip)} disabled={!!busy}>
+            Skip
+          </button>
+        </div>
+        <div className="muted small onboarding-starter-copy">
+          Starter set: London System as White, Caro-Kann as Black, and QGD as Black.
+        </div>
+        {error && <div className="account-status bad small">{error}</div>}
+      </div>
     </div>
   );
 }
