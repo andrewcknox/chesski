@@ -116,6 +116,22 @@ export interface CreateRepertoireOptions {
   projectKind?: Repertoire['projectKind'];
 }
 
+const DEFAULT_MAIN_REPERTOIRES: Array<Pick<CreateRepertoireOptions, 'name' | 'color' | 'projectKind'>> = [
+  { name: 'White Main Repertoire', color: 'w', projectKind: 'standard' },
+  { name: 'Black Main Repertoire', color: 'b', projectKind: 'standard' },
+];
+
+export async function ensureDefaultMainRepertoires(): Promise<Repertoire[]> {
+  const existing = await listRepertoires();
+  if (existing.length > 0) return existing;
+
+  const created: Repertoire[] = [];
+  for (const starter of DEFAULT_MAIN_REPERTOIRES) {
+    created.push(await createRepertoire(starter));
+  }
+  return created;
+}
+
 export async function createRepertoire(options: CreateRepertoireOptions): Promise<Repertoire> {
   const db = await getDB();
   const now = new Date().toISOString();

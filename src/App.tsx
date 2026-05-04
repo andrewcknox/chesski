@@ -15,7 +15,7 @@ import {
   listRepertoires, createRepertoire, createRepertoireFromFen,
   createRepertoireFromPgn, cloneRepertoire, deleteRepertoire,
   getEdgesByMover, getEdgesForRepertoire, setMeta, getMeta,
-  CURATED_OPENINGS,
+  CURATED_OPENINGS, ensureDefaultMainRepertoires,
 } from './lib/storage';
 import { getLichessToken } from './lib/lichess';
 import { isDue } from './lib/srs';
@@ -83,6 +83,9 @@ function App() {
         await restoreCurrentAccount();
         list = await listRepertoires();
       }
+    }
+    if (list.length === 0) {
+      list = await ensureDefaultMainRepertoires();
     }
     setRepertoires(list);
     if (list.length === 0) {
@@ -406,7 +409,7 @@ function HomeMode({ repertoires, activeRepId, refreshKey, onChoose }: {
 
       <div className="home-picker">
         <HomeRepertoireGroup
-          title="main repertoire"
+          title="main repertoires"
           repertoires={mainRepertoires}
           activeRepId={activeRep.id}
           statsByRep={statsByRep}

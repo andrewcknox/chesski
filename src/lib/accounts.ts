@@ -1,5 +1,5 @@
 import { getLichessToken, setLichessToken } from './lichess';
-import { exportAll, getMeta, importAll, setMeta, type ExportData } from './storage';
+import { ensureDefaultMainRepertoires, exportAll, getMeta, importAll, setMeta, type ExportData } from './storage';
 import { getHistoryProgress, saveHistoryProgress, type ProgressByCard } from './historySrs';
 import { loadPersistentVault, savePersistentVault, type PersistentVault } from './localVault';
 
@@ -197,6 +197,7 @@ export async function createAccount(username: string, password: string): Promise
   const now = new Date().toISOString();
   const salt = randomHex(16);
   await saveRecoverySnapshot('Before account creation');
+  await ensureDefaultMainRepertoires();
   const snapshot = await currentAccountSnapshot(now);
   const account: LocalAccount = {
     id: `acct_${Date.now().toString(36)}_${randomHex(4)}`,

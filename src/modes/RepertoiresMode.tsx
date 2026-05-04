@@ -82,7 +82,7 @@ export function RepertoiresMode({
           Openings live inside a repertoire. Side repertoires are for plans that intentionally disagree from the same position.
         </div>
         <ProjectGroup
-          title="main repertoire"
+          title="main repertoires"
           reps={standard}
           activeRepId={activeRepId}
           counts={counts}
