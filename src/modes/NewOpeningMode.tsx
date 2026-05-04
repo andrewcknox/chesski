@@ -8,6 +8,11 @@ import {
   getRepertoire,
   markCuratedOpeningScaffolds,
 } from '../lib/storage';
+import {
+  getImportMemoryForOpening,
+  importMemoryKeyForOpening,
+  type ImportMemoryEntry,
+} from '../lib/importMemory';
 import type { CuratedOpening, OpeningLine } from '../lib/openings';
 import type { Color, NormFen, Repertoire } from '../types';
 
@@ -68,6 +73,7 @@ export function NewOpeningMode({
   const selected = selectedKey === CUSTOM_OPENING_KEY
     ? null
     : visibleOpenings.find(item => item.opening.key === selectedKey) ?? visibleOpenings[0] ?? null;
+  const [historyByKey, setHistoryByKey] = useState<Record<string, ImportMemoryEntry | null>>({});
   const [mode, setMode] = useState<FlowMode>(startOnly || repertoires.length === 0 ? 'new' : 'add');
   const [targetId, setTargetId] = useState(activeRepId ?? repertoires[0]?.id ?? '');
   const [name, setName] = useState('');
@@ -85,6 +91,7 @@ export function NewOpeningMode({
     if (!selected) return repertoires;
     return repertoires.filter(rep => rep.color === selected.opening.color);
   }, [customColor, repertoires, selected, selectedKey]);
+  const selectedHistory = selected ? historyByKey[importMemoryKeyForOpening(selected.opening)] ?? null : null;
 
   useEffect(() => {
     setCustomColor(catalogColor);
@@ -92,6 +99,21 @@ export function NewOpeningMode({
     if (visibleOpenings.some(item => item.opening.key === selectedKey)) return;
     setSelectedKey(visibleOpenings[0]?.opening.key ?? '');
   }, [catalogColor, selectedKey, visibleOpenings]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(visibleOpenings.map(async item => {
+        const key = importMemoryKeyForOpening(item.opening);
+        const memory = await getImportMemoryForOpening(item.opening);
+        return [key, memory] as const;
+      }));
+      if (!cancelled) {
+        setHistoryByKey(current => ({ ...current, ...Object.fromEntries(entries) }));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [visibleOpenings]);
 
   useEffect(() => {
     if (startOnly || repertoires.length === 0) setMode('new');
@@ -142,6 +164,12 @@ export function NewOpeningMode({
     const lines = selectedMoves.length > 0 ? selectedMoves : [selected.opening.moves];
     if (action === 'new') await createSelected(lines);
     else await addSelected(lines);
+  }
+
+  async function useImportedHistory(action: FlowMode) {
+    if (!selectedHistory) return;
+    if (action === 'new') await createSelected(selectedHistory.lines);
+    else await addSelected(selectedHistory.lines);
   }
 
   async function createSelected(lines: string[][]) {
@@ -309,29 +337,33 @@ export function NewOpeningMode({
         </div>
 
         <div className="opening-catalog">
-          {visibleOpenings.map(item => (
-            <button
-              key={item.opening.key}
-              className={'opening-card' + (item.opening.key === selectedKey ? ' selected' : '')}
-              onClick={() => setSelectedKey(item.opening.key)}
-            >
-              <div className="opening-card-board" aria-hidden="true">
-                <Board
-                  fen={item.signatureFen}
-                  orientation={item.opening.color === 'w' ? 'white' : 'black'}
-                  onMove={() => false}
-                  allowMoves={false}
-                  size={116}
-                  showNotation={false}
-                />
-              </div>
-              <div className="opening-card-copy">
-                <strong>{item.opening.name}</strong>
-                <span>{item.opening.color === 'w' ? 'White' : 'Black'} repertoire</span>
-                <span className="opening-card-line">{item.moveText}</span>
-              </div>
-            </button>
-          ))}
+          {visibleOpenings.map(item => {
+            const history = historyByKey[importMemoryKeyForOpening(item.opening)];
+            return (
+              <button
+                key={item.opening.key}
+                className={'opening-card' + (item.opening.key === selectedKey ? ' selected' : '')}
+                onClick={() => setSelectedKey(item.opening.key)}
+              >
+                <div className="opening-card-board" aria-hidden="true">
+                  <Board
+                    fen={item.signatureFen}
+                    orientation={item.opening.color === 'w' ? 'white' : 'black'}
+                    onMove={() => false}
+                    allowMoves={false}
+                    size={116}
+                    showNotation={false}
+                  />
+                </div>
+                <div className="opening-card-copy">
+                  <strong>{item.opening.name}</strong>
+                  <span>{item.opening.color === 'w' ? 'White' : 'Black'} repertoire</span>
+                  {history && <span className="opening-history-pill">{history.gameCount} imported games</span>}
+                  <span className="opening-card-line">{item.moveText}</span>
+                </div>
+              </button>
+            );
+          })}
           <button
             className={'opening-card custom-opening-card' + (selectedKey === CUSTOM_OPENING_KEY ? ' selected' : '')}
             onClick={() => setSelectedKey(CUSTOM_OPENING_KEY)}
@@ -384,6 +416,21 @@ export function NewOpeningMode({
               Signature position after {selected.opening.moves.length} moves from the normal starting position.
             </div>
 
+            {selectedHistory && (
+              <div className="opening-history-panel">
+                <strong>Use your imported history?</strong>
+                <div className="muted small">
+                  Chesski found {selectedHistory.gameCount} of your games in this opening and saved {selectedHistory.lines.length} line{selectedHistory.lines.length === 1 ? '' : 's'} from that import.
+                </div>
+                <div className="row opening-history-actions">
+                  <button className="primary" onClick={() => void useImportedHistory(mode)} disabled={busy || (mode === 'add' && !targetId)}>
+                    {busy ? 'Adding...' : 'Use my history'}
+                  </button>
+                  <span className="muted small">Or continue below with Chesski's normal algorithm.</span>
+                </div>
+              </div>
+            )}
+
             {mode === 'new' ? (
           <div className="opening-action-form">
             <input value={name} onChange={e => setName(e.target.value)} placeholder="Repertoire name" />
@@ -399,7 +446,7 @@ export function NewOpeningMode({
               </span>
             </label>
             <button className="primary" onClick={() => startPreparation('new')} disabled={busy}>
-              {busy ? 'Creating...' : 'Create and learn'}
+              {busy ? 'Creating...' : "Use Chesski's algorithm"}
             </button>
           </div>
             ) : (
@@ -412,7 +459,7 @@ export function NewOpeningMode({
                   ))}
                 </select>
                 <button className="primary" onClick={() => startPreparation('add')} disabled={busy || !targetId}>
-                  {busy ? 'Adding...' : 'Add and learn'}
+                  {busy ? 'Adding...' : "Use Chesski's algorithm"}
                 </button>
               </>
             ) : (

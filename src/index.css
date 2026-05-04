@@ -448,6 +448,14 @@ a { color: var(--accent); }
   color: var(--text-dim);
   font-size: 12px;
 }
+.opening-history-pill {
+  justify-self: start;
+  color: var(--good) !important;
+  background: rgba(76, 175, 80, 0.12);
+  border: 1px solid rgba(76, 175, 80, 0.38);
+  border-radius: 999px;
+  padding: 2px 7px;
+}
 .opening-card-line {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
   overflow-wrap: anywhere;
@@ -470,6 +478,18 @@ a { color: var(--accent); }
 }
 .opening-action-copy {
   margin-top: 8px;
+}
+.opening-history-panel {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 10px;
+  background: rgba(76, 175, 80, 0.08);
+  border: 1px solid rgba(76, 175, 80, 0.35);
+  border-radius: 6px;
+}
+.opening-history-actions {
+  margin-top: 4px;
 }
 .opening-action-form {
   display: grid;
@@ -1051,6 +1071,41 @@ a { color: var(--accent); }
   display: grid;
   gap: 10px;
 }
+.import-prompt-panel {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+  background: rgba(74, 144, 226, 0.1);
+  border: 1px solid rgba(74, 144, 226, 0.35);
+  border-radius: 6px;
+}
+.import-prompt-panel h4 {
+  margin: 0;
+  color: var(--text);
+}
+.import-prompt-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+}
+.import-prompt-list button {
+  display: grid;
+  gap: 3px;
+  text-align: left;
+}
+.import-prompt-list span {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.import-memory-note {
+  margin-bottom: 12px;
+  padding: 10px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
 .import-root-card {
   display: grid;
   grid-template-columns: 104px minmax(0, 1fr);
@@ -1059,6 +1114,10 @@ a { color: var(--accent); }
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-elev-2);
+}
+.import-root-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(74, 144, 226, 0.35) inset;
 }
 .import-root-board {
   width: 104px;
@@ -1083,6 +1142,9 @@ a { color: var(--accent); }
 .import-root-title span {
   color: var(--text-dim);
   font-size: 12px;
+}
+.import-root-actions {
+  margin-top: -2px;
 }
 .import-line-preview {
   white-space: pre-line;

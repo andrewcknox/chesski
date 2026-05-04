@@ -9,8 +9,11 @@ import {
   type ImportSpeed,
   type RootDraft,
 } from '../lib/gameImport';
+import { rememberImportDraft } from '../lib/importMemory';
 import { addMovesToRepertoire, getRepertoire, markCuratedOpeningScaffolds } from '../lib/storage';
 import type { Color, NormFen, Repertoire } from '../types';
+
+const DEFAULT_PREP_PROMPT_THRESHOLD = 5;
 
 export function GameImportMode({
   repertoires,
@@ -31,9 +34,11 @@ export function GameImportMode({
   const [gameLimit, setGameLimit] = useState(500);
   const [pgn, setPgn] = useState('');
   const [threshold, setThreshold] = useState(75);
+  const [prepPromptThreshold, setPrepPromptThreshold] = useState(DEFAULT_PREP_PROMPT_THRESHOLD);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<ImportDraft | null>(null);
+  const [selectedRootKey, setSelectedRootKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [applying, setApplying] = useState(false);
   const [applyStatus, setApplyStatus] = useState<string | null>(null);
@@ -60,6 +65,7 @@ export function GameImportMode({
     setStatus('Starting import...');
     setError(null);
     setDraft(null);
+    setSelectedRootKey(null);
     setApplyStatus(null);
     try {
       const nextDraft = await buildImportDraft({
@@ -74,8 +80,12 @@ export function GameImportMode({
         onStatus: setStatus,
         signal: abort.signal,
       });
+      await rememberImportDraft(nextDraft, source);
+      const recommended = nextDraft.roots.filter(root => root.gameCount >= prepPromptThreshold && root.lines.length > 0);
+      const storedCount = nextDraft.roots.filter(root => root.lines.length > 0).length;
       setDraft(nextDraft);
-      setStatus(nextDraft.skippedReason ?? `Built ${nextDraft.roots.length} opening draft${nextDraft.roots.length === 1 ? '' : 's'}.`);
+      setSelectedRootKey(recommended[0]?.opening.key ?? null);
+      setStatus(nextDraft.skippedReason ?? `Saved ${storedCount} opening histor${storedCount === 1 ? 'y' : 'ies'}. ${recommended.length} met the ${prepPromptThreshold}-game study threshold.`);
     } catch (err) {
       if (abort.signal.aborted) setStatus('Import cancelled.');
       else setError(err instanceof Error ? err.message : String(err));
@@ -96,8 +106,10 @@ export function GameImportMode({
     );
   }
 
-  async function applyDraft() {
-    if (!draft || !target) return;
+  async function applyDraft(rootKey = selectedRootKey) {
+    if (!draft || !target || !rootKey) return;
+    const root = draft.roots.find(item => item.opening.key === rootKey);
+    if (!root) return;
     setApplying(true);
     setError(null);
     setApplyStatus(null);
@@ -106,16 +118,14 @@ export function GameImportMode({
       if (!rep) throw new Error('Could not find that repertoire.');
       let added = 0;
       let reused = 0;
-      for (const root of draft.roots) {
-        for (const line of root.lines) {
-          const result = await addMovesToRepertoire(rep, line, { scaffoldPlyCount: root.opening.moves.length });
-          added += result.addedEdges;
-          reused += result.reusedEdges;
-        }
+      for (const line of root.lines) {
+        const result = await addMovesToRepertoire(rep, line, { scaffoldPlyCount: root.opening.moves.length });
+        added += result.addedEdges;
+        reused += result.reusedEdges;
       }
       await markCuratedOpeningScaffolds(rep);
       await onChanged();
-      setApplyStatus(`${added} moves added, ${reused} reused from ${draft.roots.length} opening draft${draft.roots.length === 1 ? '' : 's'}.`);
+      setApplyStatus(`${root.opening.name}: ${added} moves added, ${reused} reused. The other imported openings are saved for later.`);
       onOpen(rep.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -200,6 +210,18 @@ export function GameImportMode({
             />
           </label>
 
+          <label>
+            <span className="small muted">Study prompt threshold</span>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              step={1}
+              value={prepPromptThreshold}
+              onChange={e => setPrepPromptThreshold(Math.max(1, Number(e.target.value) || DEFAULT_PREP_PROMPT_THRESHOLD))}
+            />
+          </label>
+
           {source === 'pgn' && (
             <textarea
               className="review-pgn-box import-pgn-box"
@@ -231,13 +253,13 @@ export function GameImportMode({
               </div>
             )}
           </div>
-          {draft && draft.roots.length > 0 && (
+          {draft && draft.roots.some(root => root.gameCount >= prepPromptThreshold && root.lines.length > 0) && (
             <div className="import-apply-box">
               <select value={target?.id ?? ''} onChange={e => setTargetId(e.target.value)}>
                 {compatibleReps.map(rep => <option key={rep.id} value={rep.id}>{rep.name}</option>)}
               </select>
-              <button className="primary" onClick={applyDraft} disabled={applying || !target}>
-                {applying ? 'Adding...' : 'Add draft'}
+              <button className="primary" onClick={() => void applyDraft()} disabled={applying || !target || !selectedRootKey}>
+                {applying ? 'Adding...' : 'Study selected'}
               </button>
             </div>
           )}
@@ -248,9 +270,27 @@ export function GameImportMode({
         ) : draft.roots.length === 0 ? (
           <div className="settings-empty-drop">{draft.skippedReason ?? 'No draft lines yet.'}</div>
         ) : (
-          <div className="import-root-list">
-            {draft.roots.map(root => <RootDraftCard key={root.opening.key} root={root} />)}
-          </div>
+          <>
+            <OpeningPromptList
+              roots={draft.roots.filter(root => root.gameCount >= prepPromptThreshold && root.lines.length > 0)}
+              selectedRootKey={selectedRootKey}
+              onSelect={setSelectedRootKey}
+            />
+            <div className="import-root-list">
+              {draft.roots.map(root => (
+                <RootDraftCard
+                  key={root.opening.key}
+                  root={root}
+                  meetsThreshold={root.gameCount >= prepPromptThreshold}
+                  selected={root.opening.key === selectedRootKey}
+                  onSelect={() => root.lines.length > 0 && setSelectedRootKey(root.opening.key)}
+                  onStudyAnyway={() => void applyDraft(root.opening.key)}
+                  applying={applying}
+                  canApply={!!target && root.lines.length > 0}
+                />
+              ))}
+            </div>
+          </>
         )}
 
         {applyStatus && <div className="account-status good small">{applyStatus}</div>}
@@ -259,11 +299,51 @@ export function GameImportMode({
   );
 }
 
-function RootDraftCard({ root }: { root: RootDraft }) {
+function OpeningPromptList({ roots, selectedRootKey, onSelect }: {
+  roots: RootDraft[];
+  selectedRootKey: string | null;
+  onSelect: (key: string) => void;
+}) {
+  if (roots.length === 0) {
+    return (
+      <div className="import-memory-note">
+        No opening reached the study threshold yet. Chesski saved the import, so those openings can still be used later from New Opening.
+      </div>
+    );
+  }
+
+  return (
+    <div className="import-prompt-panel">
+      <h4>Pick one to study first</h4>
+      <div className="import-prompt-list">
+        {roots.map(root => (
+          <button
+            key={root.opening.key}
+            className={root.opening.key === selectedRootKey ? 'selected-choice' : ''}
+            onClick={() => onSelect(root.opening.key)}
+          >
+            <strong>{root.opening.name}</strong>
+            <span>{root.gameCount} games</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RootDraftCard({ root, meetsThreshold, selected, onSelect, onStudyAnyway, applying, canApply }: {
+  root: RootDraft;
+  meetsThreshold: boolean;
+  selected: boolean;
+  onSelect: () => void;
+  onStudyAnyway: () => void;
+  applying: boolean;
+  canApply: boolean;
+}) {
   const preview = previewFen(root.opening.moves);
   const replacements = root.decisions.filter(item => item.kind === 'replaced').length;
   return (
-    <div className="import-root-card">
+    <div className={'import-root-card' + (selected ? ' selected' : '')}>
       <div className="import-root-board">
         <Board
           fen={preview}
@@ -278,6 +358,16 @@ function RootDraftCard({ root }: { root: RootDraft }) {
         <div className="import-root-title">
           <strong>{root.opening.name}</strong>
           <span>{root.gameCount} game{root.gameCount === 1 ? '' : 's'} · {root.lines.length} line{root.lines.length === 1 ? '' : 's'} · {replacements} replacement{replacements === 1 ? '' : 's'}</span>
+        </div>
+        <div className="row import-root-actions">
+          {meetsThreshold ? (
+            <button onClick={onSelect} disabled={root.lines.length === 0}>{selected ? 'Selected' : 'Study this first'}</button>
+          ) : (
+            <button onClick={onStudyAnyway} disabled={applying || !canApply}>
+              {applying ? 'Adding...' : 'Study anyway'}
+            </button>
+          )}
+          {!meetsThreshold && <span className="muted small">Saved for later</span>}
         </div>
         <div className="import-line-preview mono">{root.lines.slice(0, 3).map(line => line.join(' ')).join('\n')}</div>
         <div className="import-decision-list">

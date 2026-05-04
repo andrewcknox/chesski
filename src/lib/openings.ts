@@ -784,7 +784,7 @@ function mirrorOpeningForColor(opening: CuratedOpening, color: Color): CuratedOp
   return {
     ...mirrorLine(opening, color),
     color,
-    name: `${color === 'w' ? 'White' : 'Black'} vs ${opening.name}`,
+    name: opening.name,
   };
 }
 
