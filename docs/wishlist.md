@@ -24,6 +24,9 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 
 ## Training And Review
 
+- Randomize the order in which new SRS cards are introduced.
+- Treat moves between the starting position and a core opening as scaffold only, not SRS cards.
+- Add a Chessable-style timer bar for learning/training. Default to 30 seconds. When the timer reaches zero, count the move wrong for SRS, show the correct-move arrow, and prompt the user to play it. Include a pause-timer option.
 - When the user gets the last move wrong in a learning line, show clear wrong-answer feedback and show the correct move.
 - Make "Learn + Review" always include review work. If no cards are due, pull some not-due cards as fallback review.
 - During learning or reviewing sessions, hide the other top-level navigation headings because clicking away mid-session usually does not make sense.
@@ -35,8 +38,28 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 - Make preparing a new line faster and more reliable. Sometimes it says it is preparing a new line and never completes until the app is restarted.
 - If engine eval shows "Current: ..." and "Line end: ..." for too long, show a clearer loading/error state and avoid leaving the user unsure whether anything is happening.
 
+## Analysis And Exploration
+
+- Add an analysis-board concept at any position with white/black exploration, Stockfish, book data, and related tools. This is low priority because it is complicated.
+- Before building the full analysis board, add a simpler button that opens Lichess analysis with the current FEN loaded.
+
+## Personalization And Preferences
+
+- Add chessboard customizability.
+- Add chess piece customizability.
+- Add chess piece animation speed customizability, separately configurable for teaching and quiz/training.
+- Toggle highlighting legal moves.
+- Toggle piece sound.
+
+## Opening Discovery And Recommendations
+
+- Add a style quiz as an alternative to starting from scratch: tactical vs positional, conservative vs aggressive, sharp vs flat, then recommend an Algorithm pack based on the answers.
+- Browse other opening training apps for nice features Chesski lacks and could copy.
+
 ## Motivation And Delight
 
+- Add chess quote cards like agadmator video quotes. Each quote card should have two clozes: who said it and a critical word in the quote.
+- Generally beautify the website so it is pleasant to look at and feels good to use.
 - Redesign the desktop/app icon from a stronger source asset. The current skier/knight mark does not read clearly enough as either a knight or a ski pole at desktop size.
 - Add more ADD-friendly animations that make the app feel rewarding and alive without slowing down fast training.
 - Add an Anki/GitHub-style heat map for daily activity, including reviews and new cards.
