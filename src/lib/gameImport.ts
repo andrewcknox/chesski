@@ -5,7 +5,7 @@ import { evaluateMoveCpLoss } from './autosuggest';
 import { fetchExplorer, type LichessExplorerResponse } from './lichess';
 import { CURATED_OPENINGS, type CuratedOpening } from './openings';
 
-export type ImportSource = 'chesscom' | 'pgn';
+export type ImportSource = 'chesscom' | 'lichess' | 'pgn';
 export type ImportSpeed = 'bullet' | 'blitz' | 'rapid';
 
 export interface ImportOptions {
@@ -15,6 +15,7 @@ export interface ImportOptions {
   speeds: ImportSpeed[];
   pgn?: string;
   chessComMonths?: number | 'all';
+  gameLimit?: number;
   cpLossThreshold: number;
   onStatus?: (message: string) => void;
   signal?: AbortSignal;
@@ -98,7 +99,9 @@ export const ALGORITHM_TOOLTIP =
 export async function buildImportDraft(options: ImportOptions): Promise<ImportDraft> {
   const games = options.source === 'chesscom'
     ? await fetchChessComGames(options)
-    : parsePgnGames(options.pgn ?? '', options.username);
+    : options.source === 'lichess'
+      ? await fetchLichessGames(options)
+      : parsePgnGames(options.pgn ?? '', options.username);
   const filtered = games.filter(game => gameMatchesOptions(game, options));
   options.onStatus?.(`Found ${filtered.length} ${sideName(options.side)} ${speedLabel(options.speeds)} game${filtered.length === 1 ? '' : 's'}.`);
 
@@ -186,6 +189,36 @@ async function fetchChessComGames(options: ImportOptions): Promise<ParsedImportG
   return games;
 }
 
+async function fetchLichessGames(options: ImportOptions): Promise<ParsedImportGame[]> {
+  const username = normalizeLichessUsername(options.username);
+  if (!username) throw new Error('Enter a Lichess username.');
+  options.onStatus?.('Downloading Lichess games...');
+  const params = new URLSearchParams({
+    perfType: options.speeds.join(','),
+    color: options.side === 'w' ? 'white' : 'black',
+    max: String(options.gameLimit ?? 500),
+    moves: 'true',
+    tags: 'true',
+    clocks: 'false',
+    evals: 'false',
+    opening: 'false',
+    sort: 'dateDesc',
+  });
+  const res = await fetch(`https://lichess.org/api/games/user/${encodeURIComponent(username)}?${params.toString()}`, {
+    signal: options.signal,
+    headers: { Accept: 'application/x-chess-pgn' },
+  });
+  if (res.status === 404) {
+    throw new Error(`Lichess could not find public games for "${username}". Check the spelling, paste just the profile name, or upload a PGN instead.`);
+  }
+  if (!res.ok) throw new Error(`Lichess games returned ${res.status}. Upload a PGN if the live import is unavailable.`);
+  const text = await res.text();
+  return parsePgnGames(text, username).map(game => ({
+    ...game,
+    speed: lichessSpeedFromHeaders(game.pgn) ?? game.speed,
+  }));
+}
+
 function parsePgnGames(pgn: string, username: string): ParsedImportGame[] {
   return splitPgn(pgn)
     .map((gamePgn, idx) => parseSinglePgn(gamePgn, username, `pgn-${idx}`))
@@ -230,7 +263,7 @@ function splitPgn(pgn: string): string[] {
 }
 
 function gameMatchesOptions(game: ParsedImportGame, options: ImportOptions): boolean {
-  const username = normalizeChessComUsername(options.username);
+  const username = normalizeImportUsername(options.username, options.source);
   if (username) {
     const sideName = options.side === 'w' ? game.white : game.black;
     if (sideName.trim().toLowerCase() !== username) return false;
@@ -238,9 +271,22 @@ function gameMatchesOptions(game: ParsedImportGame, options: ImportOptions): boo
   return options.speeds.includes(game.speed as ImportSpeed);
 }
 
+function normalizeImportUsername(value: string, source: ImportSource): string {
+  if (source === 'chesscom') return normalizeChessComUsername(value);
+  if (source === 'lichess') return normalizeLichessUsername(value);
+  return value.trim().replace(/^@/, '').toLowerCase();
+}
+
 function normalizeChessComUsername(value: string): string {
   const trimmed = value.trim();
   const match = trimmed.match(/chess\.com\/(?:member|player|stats|games)\/([^/?#\s]+)/i);
+  const raw = match?.[1] ?? trimmed.replace(/^@/, '');
+  return raw.trim().toLowerCase();
+}
+
+function normalizeLichessUsername(value: string): string {
+  const trimmed = value.trim();
+  const match = trimmed.match(/lichess\.org\/(?:@\/)?([^/?#\s]+)/i);
   const raw = match?.[1] ?? trimmed.replace(/^@/, '');
   return raw.trim().toLowerCase();
 }
@@ -533,6 +579,15 @@ function inferSpeed(timeControl: unknown): ImportSpeed | 'other' {
   if (base < 600) return 'blitz';
   if (base < 1800) return 'rapid';
   return 'other';
+}
+
+function lichessSpeedFromHeaders(pgn: string): ImportSpeed | 'other' | null {
+  const match = pgn.match(/^\[Event\s+"([^"]+)"/m);
+  const event = match?.[1].toLowerCase() ?? '';
+  if (event.includes('bullet')) return 'bullet';
+  if (event.includes('blitz')) return 'blitz';
+  if (event.includes('rapid')) return 'rapid';
+  return null;
 }
 
 function sideName(side: Color): string {

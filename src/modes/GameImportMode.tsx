@@ -28,6 +28,7 @@ export function GameImportMode({
   const [side, setSide] = useState<Color>('w');
   const [speeds, setSpeeds] = useState<ImportSpeed[]>(['blitz', 'rapid']);
   const [months, setMonths] = useState<number | 'all'>(12);
+  const [gameLimit, setGameLimit] = useState(500);
   const [pgn, setPgn] = useState('');
   const [threshold, setThreshold] = useState(75);
   const [status, setStatus] = useState<string | null>(null);
@@ -68,6 +69,7 @@ export function GameImportMode({
         speeds,
         pgn,
         chessComMonths: months,
+        gameLimit,
         cpLossThreshold: threshold,
         onStatus: setStatus,
         signal: abort.signal,
@@ -132,13 +134,14 @@ export function GameImportMode({
 
         <div className="segmented import-source-toggle">
           <button className={source === 'chesscom' ? 'active' : ''} onClick={() => setSource('chesscom')}>Chess.com</button>
+          <button className={source === 'lichess' ? 'active' : ''} onClick={() => setSource('lichess')}>Lichess</button>
           <button className={source === 'pgn' ? 'active' : ''} onClick={() => setSource('pgn')}>PGN</button>
         </div>
 
         <div className="import-form">
           <label>
             <span className="small muted">Username</span>
-            <input value={username} onChange={e => setUsername(e.target.value)} placeholder={source === 'chesscom' ? 'Chess.com username' : 'Username in PGN headers'} />
+            <input value={username} onChange={e => setUsername(e.target.value)} placeholder={usernamePlaceholder(source)} />
           </label>
 
           <div className="import-control-row">
@@ -157,6 +160,17 @@ export function GameImportMode({
                   <option value="12">Last 12 months</option>
                   <option value="24">Last 24 months</option>
                   <option value="all">All archives</option>
+                </select>
+              </label>
+            )}
+            {source === 'lichess' && (
+              <label>
+                <span className="small muted">Game limit</span>
+                <select value={String(gameLimit)} onChange={e => setGameLimit(Number(e.target.value))}>
+                  <option value="100">Latest 100 games</option>
+                  <option value="250">Latest 250 games</option>
+                  <option value="500">Latest 500 games</option>
+                  <option value="1000">Latest 1000 games</option>
                 </select>
               </label>
             )}
@@ -196,7 +210,7 @@ export function GameImportMode({
           )}
 
           <div className="row">
-            <button className="primary" onClick={analyze} disabled={busy || speeds.length === 0 || (source === 'chesscom' && !username.trim()) || (source === 'pgn' && !pgn.trim())}>
+            <button className="primary" onClick={analyze} disabled={busy || speeds.length === 0 || (source !== 'pgn' && !username.trim()) || (source === 'pgn' && !pgn.trim())}>
               {busy ? 'Building...' : 'Build draft'}
             </button>
             {busy && <button onClick={cancel}>Cancel</button>}
@@ -303,4 +317,10 @@ function previewFen(moves: string[]): NormFen {
 
 function formatCp(cpLoss: number | null): string {
   return cpLoss === null ? 'no eval' : `${Math.round(cpLoss)} cp`;
+}
+
+function usernamePlaceholder(source: ImportSource): string {
+  if (source === 'chesscom') return 'Chess.com username';
+  if (source === 'lichess') return 'Lichess username';
+  return 'Username in PGN headers';
 }
