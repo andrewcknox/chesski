@@ -580,7 +580,7 @@ export async function continueLearnLine(
   const fullPath = [...fullPathPrefix];
   const newEdges = [...baseNewEdges];
   let cursorFen = fullPath[fullPath.length - 1]?.childFen ?? rep.rootFen;
-  let yourMovesAdded = fullPath.slice(generationStartIndex).filter(e => e.mover === rep.color).length;
+  let yourMovesAdded = fullPath.slice(generationStartIndex).filter(e => e.mover === rep.color && !e.isScaffold).length;
 
   while (yourMovesAdded < targetYourMoves) {
     if (signal?.aborted) break;

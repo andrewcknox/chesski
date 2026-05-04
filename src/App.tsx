@@ -528,6 +528,7 @@ function NewRepertoireCreator({ repertoires, onCreated, compact }: {
           color: template.color,
           openingKey: template.key,
           moves: template.moves,
+          scaffoldPlyCount: template.moves.length,
           projectKind,
         });
       } else if (mode === 'empty') {

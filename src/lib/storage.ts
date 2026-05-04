@@ -4,7 +4,7 @@ import type { Color, Edge, NormFen, PositionNode, Repertoire } from '../types';
 import { edgeId, newId } from '../types';
 import { applyMove, normalizeFen, STARTING_FEN_NORM } from './chess';
 import { freshSrsState } from './srs';
-import { CURATED_OPENINGS, findOpening, type CuratedOpening } from './openings';
+import { CURATED_OPENINGS, findOpening, type ResolvedOpeningLine } from './openings';
 
 interface ChessTrainerDB extends DBSchema {
   repertoires: {
@@ -113,6 +113,7 @@ export interface CreateRepertoireOptions {
   rootFen?: NormFen;
   openingKey?: string | null;
   moves?: string[];
+  scaffoldPlyCount?: number;
   projectKind?: Repertoire['projectKind'];
 }
 
@@ -148,20 +149,21 @@ export async function createRepertoire(options: CreateRepertoireOptions): Promis
   await db.put('repertoires', rep);
   let cursorFen: NormFen = rep.rootFen;
   await ensureNode(cursorFen);
-  for (const move of options.moves ?? []) {
-    const result = await playMoveInRepertoire(rep.id, cursorFen, move);
+  for (const [idx, move] of (options.moves ?? []).entries()) {
+    const result = await playMoveInRepertoire(rep.id, cursorFen, move, { isScaffold: idx < (options.scaffoldPlyCount ?? 0) });
     if (!result) throw new Error(`Could not add move ${move} from this position.`);
     cursorFen = result.edge.childFen;
   }
   return rep;
 }
 
-export async function createRepertoireFromOpening(opening: CuratedOpening): Promise<Repertoire> {
+export async function createRepertoireFromOpening(opening: ResolvedOpeningLine): Promise<Repertoire> {
   return createRepertoire({
     name: opening.name,
     color: opening.color,
     openingKey: opening.key,
     moves: opening.moves,
+    scaffoldPlyCount: opening.moves.length,
   });
 }
 
@@ -185,34 +187,64 @@ export async function addOpeningToRepertoire(repertoireId: string, openingKey: s
   if (rep.color !== opening.color) {
     throw new Error(`${opening.name} is a ${opening.color === 'w' ? 'White' : 'Black'} opening. Add it to a ${opening.color === 'w' ? 'White' : 'Black'} repertoire.`);
   }
-  return addMovesToRepertoire(rep, opening.moves);
+  const result = await addMovesToRepertoire(rep, opening.moves, { scaffoldPlyCount: opening.moves.length });
+  await markCuratedOpeningScaffolds(rep);
+  return result;
 }
 
-export async function addMovesToRepertoire(rep: Repertoire, moves: string[]): Promise<AddLineResult> {
+export interface AddMovesOptions {
+  scaffoldPlyCount?: number;
+}
+
+export async function addMovesToRepertoire(rep: Repertoire, moves: string[], options: AddMovesOptions = {}): Promise<AddLineResult> {
   let cursorFen: NormFen = rep.rootFen;
   let addedEdges = 0;
   let reusedEdges = 0;
-  for (const move of moves) {
+  for (const [idx, move] of moves.entries()) {
     const result = applyMove(cursorFen, move);
     if (!result) throw new Error(`Could not add move ${move} from this position.`);
 
+    const isScaffold = idx < (options.scaffoldPlyCount ?? 0);
     const outgoing = await getEdgesFromParent(rep.id, cursorFen);
     const exact = outgoing.find(e => e.uci === result.uci);
     const conflictsWithYourChoice = result.mover === rep.color
+      && !isScaffold
       && cursorFen !== rep.rootFen
-      && outgoing.some(e => e.mover === rep.color && e.uci !== result.uci);
+      && outgoing.some(e => e.mover === rep.color && !e.isScaffold && e.uci !== result.uci);
     if (conflictsWithYourChoice) {
-      const existing = outgoing.find(e => e.mover === rep.color);
+      const existing = outgoing.find(e => e.mover === rep.color && !e.isScaffold);
       throw new Error(`That opening conflicts at ${existing?.san ?? 'an existing move'}. Create a separate repertoire if you want to study both choices from the same position.`);
     }
 
-    const played = await playMoveInRepertoire(rep.id, cursorFen, move);
+    const played = await playMoveInRepertoire(rep.id, cursorFen, move, { isScaffold });
     if (!played) throw new Error(`Could not add move ${move} from this position.`);
     if (played.edgeCreated) addedEdges++;
     else if (exact) reusedEdges++;
     cursorFen = played.edge.childFen;
   }
   return { addedEdges, reusedEdges };
+}
+
+export async function markCuratedOpeningScaffolds(rep: Repertoire): Promise<number> {
+  let updated = 0;
+  for (const opening of CURATED_OPENINGS.filter(item => item.color === rep.color)) {
+    let cursorFen: NormFen = rep.rootFen;
+    for (const move of opening.moves) {
+      const result = applyMove(cursorFen, move);
+      if (!result) break;
+      const edge = await getEdge(rep.id, cursorFen, result.fen);
+      if (!edge) {
+        cursorFen = result.fen;
+        continue;
+      }
+      if (!edge.isScaffold) {
+        await putEdge({ ...edge, isScaffold: true });
+        updated++;
+      }
+      cursorFen = result.fen;
+    }
+  }
+  return updated;
 }
 
 export async function createRepertoireFromFen(name: string, color: Color, fen: string, projectKind?: Repertoire['projectKind']): Promise<Repertoire> {
@@ -292,7 +324,8 @@ export async function getEdgesIntoChild(repertoireId: string, childFen: NormFen)
 
 export async function getEdgesByMover(repertoireId: string, mover: Color): Promise<Edge[]> {
   const db = await getDB();
-  return db.getAllFromIndex('edges', 'by-rep-mover', [repertoireId, mover]);
+  const edges = await db.getAllFromIndex('edges', 'by-rep-mover', [repertoireId, mover]);
+  return edges.filter(edge => !edge.isScaffold);
 }
 
 export async function putEdge(edge: Edge): Promise<void> {
@@ -309,7 +342,8 @@ export interface PlayMoveResult {
 export async function playMoveInRepertoire(
   repertoireId: string,
   fromFen: NormFen,
-  move: string | { from: string; to: string; promotion?: string }
+  move: string | { from: string; to: string; promotion?: string },
+  options: { isScaffold?: boolean } = {}
 ): Promise<PlayMoveResult | null> {
   const result = applyMove(fromFen, move);
   if (!result) return null;
@@ -339,10 +373,14 @@ export async function playMoveInRepertoire(
       san,
       uci,
       mover,
+      ...(options.isScaffold ? { isScaffold: true } : {}),
       ...freshSrsState(),
       createdAt: now,
     };
     edgeCreated = true;
+    await edges.put(edge);
+  } else if (edge.isScaffold && !options.isScaffold) {
+    edge = { ...edge, isScaffold: false };
     await edges.put(edge);
   }
   await tx.done;
@@ -420,6 +458,7 @@ export async function resetAllSrsForRepertoire(repertoireId: string): Promise<nu
   const store = tx.objectStore('edges');
   let n = 0;
   for (const e of all) {
+    if (e.isScaffold) continue;
     await store.put({ ...e, ...freshSrsState() });
     n++;
   }

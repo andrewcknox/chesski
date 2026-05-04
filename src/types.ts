@@ -54,6 +54,9 @@ export interface Edge {
   sourceDraws?: number;
   sourceLosses?: number;
   sourceNet?: number;
+  // Scaffolding edges let a repertoire reach a core opening position without
+  // turning the lead-in into trainable "your move" cards.
+  isScaffold?: boolean;
   createdAt: string;
 }
 

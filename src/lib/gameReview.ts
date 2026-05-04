@@ -51,7 +51,7 @@ export async function reviewGamePgn(rep: Repertoire, pgn: string, side: Color, s
     const fen = normalizeFen(move.before);
     const inRepertoire = reachable.has(fen);
     const stored = await getEdgesFromParent(rep.id, fen);
-    const prepared = stored.find(edge => edge.mover === side) ?? null;
+    const prepared = stored.find(edge => edge.mover === side && !edge.isScaffold) ?? null;
     const playedPrep = Boolean(prepared && prepared.uci === move.lan);
     const evaluation = await evaluateMoveCpLoss(fen, move.lan, signal);
     const cpLoss = evaluation.cpLoss;

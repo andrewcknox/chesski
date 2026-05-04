@@ -78,7 +78,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
 
   const dueCount = useMemo(() => {
     const now = new Date();
-    return allEdges.filter(e => e.mover === repertoire.color && isDue(e, now)).length;
+    return allEdges.filter(e => isTrainableEdge(e, repertoire.color) && isDue(e, now)).length;
   }, [allEdges, repertoire.color]);
 
   const branchCount = useMemo(() => countBranches(repertoire.rootFen, allEdges), [repertoire.rootFen, allEdges]);
@@ -94,7 +94,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     if (!prev || (prev.kind !== 'walkthrough' && prev.kind !== 'test') || (phase.kind !== 'walkthrough' && phase.kind !== 'test')) return;
     const prevEdge = prev.line.fullPath[prev.cursorIdx];
     const curEdge = phase.line.fullPath[phase.cursorIdx];
-    if (prevEdge?.mover !== repertoire.color && curEdge?.mover === repertoire.color && phase.cursorIdx > prev.cursorIdx) {
+    if (prevEdge && !isTrainableEdge(prevEdge, repertoire.color) && curEdge && isTrainableEdge(curEdge, repertoire.color) && phase.cursorIdx > prev.cursorIdx) {
       setAnimateComputerMove(true);
       const timer = setTimeout(() => setAnimateComputerMove(false), 120);
       return () => clearTimeout(timer);
@@ -105,7 +105,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     let timer: ReturnType<typeof setTimeout> | null = null;
     if (phase.kind === 'walkthrough' || phase.kind === 'test') {
       const cur = phase.line.fullPath[phase.cursorIdx];
-      if (phase.sub === 'await' && cur && cur.mover !== repertoire.color) {
+      if (phase.sub === 'await' && cur && !isTrainableEdge(cur, repertoire.color)) {
         timer = setTimeout(() => advanceCursor(), OPP_AUTOPLAY_DELAY_MS);
       } else if (phase.sub === 'good-flash') {
         timer = setTimeout(() => advanceCursor(), BAD_FLASH_MS);
@@ -128,7 +128,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     if (phase.kind !== 'walkthrough' && phase.kind !== 'test') return;
     if (phase.sub !== 'await') return;
     const cur = phase.line.fullPath[phase.cursorIdx];
-    if (!cur || cur.mover !== repertoire.color) return;
+    if (!cur || !isTrainableEdge(cur, repertoire.color)) return;
     setQueuedPremove(null); // eslint-disable-line react-hooks/set-state-in-effect
     void attemptUserMove(queuedPremove);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -197,7 +197,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     if (p.kind !== 'walkthrough' && p.kind !== 'test') return false;
     if (p.sub !== 'await') return false;
     const edge = p.line.fullPath[p.cursorIdx];
-    if (!edge || edge.mover !== repertoire.color) return false;
+    if (!edge || !isTrainableEdge(edge, repertoire.color)) return false;
     const result = applyMove(edge.parentFen, move);
     if (!result) return false;
 
@@ -289,7 +289,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     onDataChange();
     const targetYourMoves = Math.max(
       1,
-      p.line.fullPath.slice(p.line.generationStartIndex).filter(e => e.mover === repertoire.color).length
+      p.line.fullPath.slice(p.line.generationStartIndex).filter(e => isTrainableEdge(e, repertoire.color)).length
     );
     const preservedNewEdges = p.line.newEdges.filter(e => {
       const idx = p.line.fullPath.findIndex(x => x.id === e.id);
@@ -408,7 +408,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
   }
 
   async function completeTestLine(p: Extract<Phase, { kind: 'test' }>) {
-    const learnedEdges = p.line.newEdges.filter(e => e.mover === repertoire.color);
+    const learnedEdges = p.line.newEdges.filter(e => isTrainableEdge(e, repertoire.color));
     for (const edge of learnedEdges) {
       const latest = await getEdge(repertoire.id, edge.parentFen, edge.childFen);
       await putEdge(gradeLearnPass(latest ?? edge));
@@ -656,7 +656,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
   // Walkthrough / Test
   if (phase.kind === 'walkthrough' || phase.kind === 'test') {
     const cur = phase.line.fullPath[phase.cursorIdx] ?? phase.line.fullPath[phase.line.fullPath.length - 1];
-    const isYour = cur.mover === repertoire.color;
+    const isYour = isTrainableEdge(cur, repertoire.color);
     const premoveTarget = getPremoveTarget(phase, repertoire.color);
     const showHintArrow = isYour && phase.sub === 'await' && (
       phase.kind === 'walkthrough' || phase.wrongCount >= HINT_AFTER_WRONG_COUNT
@@ -673,7 +673,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     const boardFen = phase.sub === 'good-flash' ? cur.childFen : cur.parentFen;
     const flashClass = phase.sub === 'good-flash' ? 'board-flash-good' : phase.sub === 'bad-flash' ? 'board-flash-bad' : undefined;
     const turn = turnAt(cur.parentFen);
-    const pillStates = computePillStates(phase);
+    const pillStates = computePillStates(phase, repertoire.color);
     const sanLineUpToHere = renderSanFromEdges(phase.line.fullPath.slice(0, phase.cursorIdx));
     const lastMove = phase.sub === 'good-flash' ? cur : phase.line.fullPath[phase.cursorIdx - 1] ?? null;
     const sourceEdge = findSourceEdge(phase.line.fullPath, phase.cursorIdx, repertoire.color);
@@ -841,7 +841,7 @@ function buildReviewQueue(edges: Edge[], includeFallback: boolean): Edge[] {
 }
 
 function SourceGamePanel({ edge, line, color }: { edge: Edge | null; line: Edge[]; color: Repertoire['color'] }) {
-  const userEdges = line.filter(e => e.mover === color);
+  const userEdges = line.filter(e => isTrainableEdge(e, color));
   const sourcedEdges = userEdges.filter(e => e.sourcePlayerName || e.sourceGameName);
   return (
     <div className="panel source-game-panel">
@@ -1003,6 +1003,10 @@ function renderSanFromEdges(edges: Edge[]): string {
   return out.join(' ');
 }
 
+function isTrainableEdge(edge: Edge, color: Repertoire['color']): boolean {
+  return edge.mover === color && !edge.isScaffold;
+}
+
 function lastMoveHighlights(edge: Edge): Record<string, string> {
   return {
     [edge.uci.slice(0, 2)]: 'rgba(245, 211, 90, 0.18)',
@@ -1040,13 +1044,13 @@ function getPremoveTarget(phase: Phase, color: Repertoire['color']): Edge | null
   if (phase.sub === 'await') {
     const cur = phase.line.fullPath[phase.cursorIdx];
     const next = phase.line.fullPath[phase.cursorIdx + 1];
-    return cur && cur.mover !== color && next?.mover === color ? next : null;
+    return cur && !isTrainableEdge(cur, color) && next && isTrainableEdge(next, color) ? next : null;
   }
   if (phase.sub === 'good-flash') {
     const next = phase.line.fullPath[phase.cursorIdx + 1];
     const afterNext = phase.line.fullPath[phase.cursorIdx + 2];
-    if (next?.mover === color) return next;
-    if (next && next.mover !== color && afterNext?.mover === color) return afterNext;
+    if (next && isTrainableEdge(next, color)) return next;
+    if (next && !isTrainableEdge(next, color) && afterNext && isTrainableEdge(afterNext, color)) return afterNext;
   }
   return null;
 }
@@ -1062,10 +1066,10 @@ function ProgressPills({ states }: { states: PillState[] }) {
   );
 }
 
-function computePillStates(phase: Phase): PillState[] {
+function computePillStates(phase: Phase, color: Repertoire['color']): PillState[] {
   if (phase.kind !== 'walkthrough' && phase.kind !== 'test') return [];
   // Pills represent the user's NEW your-color moves (i.e., newEdges that are your color).
-  const yourNewEdges = phase.line.newEdges.filter(e => e.mover === phase.line.fullPath[phase.line.generationStartIndex]?.mover);
+  const yourNewEdges = phase.line.newEdges.filter(e => isTrainableEdge(e, color));
   // The cursor tells us which of those is currently being interacted with.
   const cur = phase.line.fullPath[phase.cursorIdx];
   return yourNewEdges.map(e => {

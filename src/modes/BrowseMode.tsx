@@ -246,7 +246,7 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
 
   // Find inbound edge for currently displayed fen (for SRS panel and orientation).
   const inEdges = useMemo(() => edges.filter(e => e.childFen === displayedFen), [edges, displayedFen]);
-  const userInEdges = useMemo(() => inEdges.filter(e => e.mover === repertoire.color), [inEdges, repertoire.color]);
+  const userInEdges = useMemo(() => inEdges.filter(e => e.mover === repertoire.color && !e.isScaffold), [inEdges, repertoire.color]);
   const primaryInEdge = inEdges[0] ?? null;
   const orientation: 'white' | 'black' = primaryInEdge ? (primaryInEdge.mover === 'w' ? 'black' : 'white') : (repertoire.color === 'w' ? 'white' : 'black');
 
