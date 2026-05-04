@@ -4,6 +4,7 @@ const { Chess } = require('chess.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const MAX_OPENING_PLIES = 24;
+const MAX_GAMES_PER_PLAYER = 600;
 
 const PLAYERS = [
   { key: 'morphy', name: 'Paul Morphy', pgn: 'public/players/MorphyRaw/Morphy.pgn', match: /morphy,\s*paul/i },
@@ -15,6 +16,42 @@ const PLAYERS = [
   { key: 'tal', name: 'Mikhail Tal', pgn: 'public/players/TalRaw/Tal.pgn', match: /tal,\s*mihail|tal,\s*mikhail|tal,\s*m/i },
   { key: 'botvinnik', name: 'Mikhail Botvinnik', pgn: 'public/players/BotvinnikRaw/Botvinnik.pgn', match: /botvinnik,\s*mikhail|botvinnik,\s*m/i },
   { key: 'caruana', name: 'Fabiano Caruana', pgn: 'public/players/CaruanaRaw/Caruana.pgn', match: /caruana,\s*fabiano|caruana,\s*f/i },
+  { key: 'nimzowitsch', name: 'Aron Nimzowitsch', pgn: 'public/players/NimzowitschRaw/Nimzowitsch.pgn', match: /nimzowitsch/i },
+  { key: 'reti', name: 'Richard Reti', pgn: 'public/players/RetiRaw/Reti.pgn', match: /r[eé]ti,\s*richard|reti,\s*r/i },
+  { key: 'alekhine', name: 'Alexander Alekhine', pgn: 'public/players/AlekhineRaw/Alekhine.pgn', match: /alekhine/i },
+  { key: 'breyer', name: 'Gyula Breyer', pgn: 'public/players/BreyerRaw/Breyer.pgn', match: /breyer/i },
+  { key: 'bogoljubow', name: 'Efim Bogoljubow', pgn: 'public/players/BogoljubowRaw/Bogoljubow.pgn', match: /bogoljubow|bogolyubov/i },
+  { key: 'larsen', name: 'Bent Larsen', pgn: 'public/players/LarsenRaw/Larsen.pgn', match: /larsen,\s*bent|larsen,\s*b/i },
+  { key: 'petrosian', name: 'Tigran Petrosian', pgn: 'public/players/PetrosianRaw/Petrosian.pgn', match: /petrosian,\s*tigran|petrosian,\s*t/i },
+  { key: 'bronstein', name: 'David Bronstein', pgn: 'public/players/BronsteinRaw/Bronstein.pgn', match: /bronstein,\s*david|bronstein,\s*d/i },
+  { key: 'blackburne', name: 'Joseph Blackburne', pgn: 'public/players/BlackburneRaw/Blackburne.pgn', match: /blackburne/i },
+  { key: 'bird', name: 'Henry Bird', pgn: 'public/players/BirdRaw/Bird.pgn', match: /bird,\s*henry|bird,\s*h/i },
+  { key: 'chigorin', name: 'Mikhail Chigorin', pgn: 'public/players/ChigorinRaw/Chigorin.pgn', match: /chigorin/i },
+  { key: 'delabourdonnais', name: 'Louis de La Bourdonnais', pgn: 'public/players/DeLaBourdonnaisRaw/DeLaBourdonnais.pgn', match: /bourdonnais/i },
+  { key: 'mcdonnell', name: 'Alexander McDonnell', pgn: 'public/players/McDonnellRaw/McDonnell.pgn', match: /mcdonnell/i },
+  { key: 'staunton', name: 'Howard Staunton', pgn: 'public/players/StauntonRaw/Staunton.pgn', match: /staunton/i },
+  { key: 'steinitz', name: 'William Steinitz', pgn: 'public/players/SteinitzRaw/Steinitz.pgn', match: /steinitz/i },
+  { key: 'zukertort', name: 'Johannes Zukertort', pgn: 'public/players/ZukertortRaw/Zukertort.pgn', match: /zukertort/i },
+  { key: 'spielmann', name: 'Rudolf Spielmann', pgn: 'public/players/SpielmannRaw/Spielmann.pgn', match: /spielmann/i },
+  { key: 'benko', name: 'Pal Benko', pgn: 'public/players/BenkoRaw/Benko.pgn', match: /benko/i },
+  { key: 'smyslov', name: 'Vasily Smyslov', pgn: 'public/players/SmyslovRaw/Smyslov.pgn', match: /smyslov/i },
+  { key: 'spassky', name: 'Boris Spassky', pgn: 'public/players/SpasskyRaw/Spassky.pgn', match: /spassky/i },
+  { key: 'keres', name: 'Paul Keres', pgn: 'public/players/KeresRaw/Keres.pgn', match: /keres/i },
+  { key: 'korchnoi', name: 'Viktor Korchnoi', pgn: 'public/players/KorchnoiRaw/Korchnoi.pgn', match: /korchnoi|kortchnoi/i },
+  { key: 'giri', name: 'Anish Giri', pgn: 'public/players/GiriRaw/Giri.pgn', match: /giri,\s*anish|giri,\s*a/i },
+  { key: 'aronian', name: 'Levon Aronian', pgn: 'public/players/AronianRaw/Aronian.pgn', match: /aronian/i },
+  { key: 'mamedyarov', name: 'Shakhriyar Mamedyarov', pgn: 'public/players/MamedyarovRaw/Mamedyarov.pgn', match: /mamedyarov/i },
+  { key: 'firouzja', name: 'Alireza Firouzja', pgn: 'public/players/FirouzjaRaw/Firouzja.pgn', match: /firouzja/i },
+  { key: 'nakamura', name: 'Hikaru Nakamura', pgn: 'public/players/NakamuraRaw/Nakamura.pgn', match: /nakamura/i },
+  { key: 'vachierlagrave', name: 'Maxime Vachier-Lagrave', pgn: 'public/players/VachierLagraveRaw/VachierLagrave.pgn', match: /vachier.?lagrave/i },
+  { key: 'duda', name: 'Jan-Krzysztof Duda', pgn: 'public/players/DudaRaw/Duda.pgn', match: /duda/i },
+  { key: 'rapport', name: 'Richard Rapport', pgn: 'public/players/RapportRaw/Rapport.pgn', match: /rapport/i },
+  { key: 'so', name: 'Wesley So', pgn: 'public/players/SoRaw/So.pgn', match: /so,\s*wesley|so,\s*w/i },
+  { key: 'gukesh', name: 'Dommaraju Gukesh', pgn: 'public/players/GukeshRaw/Gukesh.pgn', match: /gukesh/i },
+  { key: 'praggnanandhaa', name: 'Rameshbabu Praggnanandhaa', pgn: 'public/players/PraggnanandhaaRaw/Praggnanandhaa.pgn', match: /praggnanandhaa/i },
+  { key: 'erigaisi', name: 'Arjun Erigaisi', pgn: 'public/players/ErigaisiRaw/Erigaisi.pgn', match: /erigaisi/i },
+  { key: 'abdusattorov', name: 'Nodirbek Abdusattorov', pgn: 'public/players/AbdusattorovRaw/Abdusattorov.pgn', match: /abdusattorov/i },
+  { key: 'keymer', name: 'Vincent Keymer', pgn: 'public/players/KeymerRaw/Keymer.pgn', match: /keymer/i },
 ];
 
 function normalizeFen(fen) {
@@ -70,7 +107,8 @@ function compareCandidates(a, b) {
 
 function makeBook(player) {
   const pgn = fs.readFileSync(path.join(ROOT, player.pgn), 'utf8');
-  const games = splitGames(pgn);
+  const allGames = splitGames(pgn);
+  const games = allGames.slice(-MAX_GAMES_PER_PLAYER);
   const positions = new Map();
   let parsed = 0;
   let indexedGames = 0;
@@ -129,7 +167,8 @@ function makeBook(player) {
     name: player.name,
     sourcePgn: player.pgn,
     maxOpeningPlies: MAX_OPENING_PLIES,
-    games: games.length,
+    games: allGames.length,
+    sampledGames: games.length,
     parsedGames: parsed,
     indexedGames,
     positions: compactPositions.length,
@@ -140,6 +179,7 @@ function makeBook(player) {
 const out = {
   generatedAt: new Date().toISOString(),
   maxOpeningPlies: MAX_OPENING_PLIES,
+  maxGamesPerPlayer: MAX_GAMES_PER_PLAYER,
   players: PLAYERS.map(makeBook),
 };
 

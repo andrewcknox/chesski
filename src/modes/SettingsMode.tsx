@@ -8,7 +8,9 @@ import {
 import {
   DEFAULT_RECOMMENDATION_SETTINGS,
   RECOMMENDATION_CHOICES,
+  RECOMMENDATION_PACKS,
   getRecommendationSettings,
+  prioritiesFromSources,
   setRecommendationSettings,
   type RecommendationSourceChoice,
   type RecommendationSourceKey,
@@ -126,6 +128,13 @@ export function SettingsMode() {
     });
   }
 
+  async function applyPack(sources: RecommendationSourceKey[]) {
+    await update({
+      ...settings,
+      playerPriorities: prioritiesFromSources(sources),
+    });
+  }
+
   function draggedSource(e: React.DragEvent): RecommendationSourceKey | null {
     const fromEvent = e.dataTransfer.getData('text/plain');
     return isSourceKey(fromEvent) ? fromEvent : null;
@@ -191,6 +200,14 @@ export function SettingsMode() {
         <h3>Opening choices</h3>
         <div className="muted small settings-copy">
           Drag sources into the order you want Chesski to check. Imported PGNs show up here as your own player-book source. Player moves need a positive record and then pass the quality guard below.
+        </div>
+        <div className="settings-pack-grid">
+          {RECOMMENDATION_PACKS.map(pack => (
+            <button key={pack.key} className="settings-pack-card" onClick={() => void applyPack(pack.sources)}>
+              <strong>{pack.name}</strong>
+              <span>{pack.description}</span>
+            </button>
+          ))}
         </div>
         <div className="settings-drop-grid">
           <div

@@ -27,6 +27,7 @@ interface PlayerBookJson {
   key: PlayerKey;
   name: string;
   games: number;
+  sampledGames?: number;
   parsedGames: number;
   indexedGames: number;
   positions: number;
@@ -36,6 +37,7 @@ interface PlayerBookJson {
 interface PlayerBooksJson {
   generatedAt: string;
   maxOpeningPlies: number;
+  maxGamesPerPlayer?: number;
   players: PlayerBookJson[];
 }
 
