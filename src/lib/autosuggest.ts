@@ -377,7 +377,7 @@ export async function findTopFrontier(rep: Repertoire, signal?: AbortSignal): Pr
   // ── Phase 1: in-memory DFS ───────────────────────────────────────────────
   type Candidate = { fen: NormFen; path: PathStep[]; games: number };
   const type1: Candidate[] = [];
-  const opponentPositions: { fen: NormFen; path: PathStep[]; storedUcis: Set<string> }[] = [];
+  const opponentPositions: { fen: NormFen; path: PathStep[]; storedEdges: Edge[] }[] = [];
 
   const dfsStack: { fen: NormFen; path: PathStep[] }[] = [{ fen: rep.rootFen, path: [] }];
   const visited = new Set<NormFen>();
@@ -405,7 +405,7 @@ export async function findTopFrontier(rep: Repertoire, signal?: AbortSignal): Pr
         }
       }
     } else {
-      opponentPositions.push({ fen, path, storedUcis: new Set(stored.map(e => e.uci)) });
+      opponentPositions.push({ fen, path, storedEdges: stored });
       for (const e of stored) {
         dfsStack.push({
           fen: e.childFen,
@@ -420,19 +420,27 @@ export async function findTopFrontier(rep: Repertoire, signal?: AbortSignal): Pr
   const type2: Candidate[] = [];
   if (opponentPositions.length > 0) {
     const explorerResults = await Promise.all(
-      opponentPositions.map(async ({ fen: oppFen, path: oppPath, storedUcis }) => {
+      opponentPositions.map(async ({ fen: oppFen, path: oppPath, storedEdges }) => {
         try {
           const data = await fetchExplorer(oppFen, { source: 'lichess' }, signal);
-          return { oppFen, oppPath, storedUcis, data };
+          return { oppFen, oppPath, storedEdges, data };
         } catch (e) {
           if (e instanceof LichessAuthError) throw e;
-          return { oppFen, oppPath, storedUcis, data: null };
+          return { oppFen, oppPath, storedEdges, data: null };
         }
       })
     );
 
-    for (const { oppFen, oppPath, storedUcis, data } of explorerResults) {
+    for (const { oppFen, oppPath, storedEdges, data } of explorerResults) {
       if (!data) continue;
+      // Don't expand to new opponent moves at positions where every stored
+      // response is a scaffold move — those positions define the opening's
+      // chosen path (e.g. 1...e5 after 1.e4 in an Italian repertoire) and
+      // should not generate off-repertoire lines like the Sicilian or Scandinavian.
+      // We only expand when there are no stored moves yet (unexplored leaf) or
+      // when non-scaffold responses have already been added here via prior learning.
+      if (storedEdges.length > 0 && storedEdges.every(e => e.isScaffold)) continue;
+      const storedUcis = new Set(storedEdges.map(e => e.uci));
       const total = data.white + data.draws + data.black;
       if (total === 0) continue;
       for (const m of data.moves) {
