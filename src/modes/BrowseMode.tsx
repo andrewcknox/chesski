@@ -536,7 +536,6 @@ function VariationFolderView({ folder, selectedLeafFen, onSelect, repertoireColo
   boardThumbSize: number;
 }) {
   const [open, setOpen] = useState(false);
-  const previewLine = folder.lines[0] ?? folder.subfolders[0]?.lines[0] ?? null;
   const previewFen = folder.fen;
   const previewOrientation: 'white' | 'black' = repertoireColor === 'w' ? 'white' : 'black';
   const totalLineCount = countAllLines(folder);

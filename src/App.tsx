@@ -297,10 +297,10 @@ function App() {
           My Lines
         </button>
         <button className={'tab' + (tab === 'review' ? ' active' : '')} onClick={() => setTab('review')}>
-          Analyze My Game
+          Review
         </button>
         <button className={'tab' + (tab === 'game-import' ? ' active' : '')} onClick={() => setTab('game-import')}>
-          My Games
+          Import
         </button>
         <button className={'tab' + (tab === 'new-opening' ? ' active' : '')} onClick={() => setTab('new-opening')}>
           New Opening
@@ -313,7 +313,7 @@ function App() {
           <span className={'badge' + (historyDueCount === 0 ? ' zero' : '')}>{historyDueCount}</span>
         </button>
         <button className={'tab' + (tab === 'settings' ? ' active' : '')} onClick={() => setTab('settings')}>
-          Algorithm
+          Settings
         </button>
         <button className={'tab' + (tab === 'account' ? ' active' : '')} onClick={() => setTab('account')}>
           Account
@@ -593,7 +593,7 @@ function HomeRepertoireCard({ rep, active, stats, onChoose }: {
   onChoose: (id: string, nextTab?: Tab) => void;
 }) {
   return (
-    <div className={'home-rep-card' + (active ? ' active' : '')}>
+    <div className={'home-rep-card' + (active ? ' active' : '')} onClick={() => onChoose(rep.id)} style={{ cursor: 'pointer' }}>
       <div className="home-rep-main">
         <div className="home-rep-title">{rep.name}</div>
         <div className="muted small">{openingLabel(rep)} - {rep.color === 'w' ? 'White' : 'Black'}</div>
@@ -603,9 +603,8 @@ function HomeRepertoireCard({ rep, active, stats, onChoose }: {
         <span><strong>{stats?.learnedMoves ?? 0}</strong> / {stats?.userMoves ?? 0} learned</span>
       </div>
       <div className="row home-rep-actions">
-        <button onClick={() => onChoose(rep.id)}>Select</button>
-        <button className="primary" onClick={() => onChoose(rep.id, 'train')}>Train</button>
-        <button onClick={() => onChoose(rep.id, 'browse')}>My Lines</button>
+        <button className="primary" onClick={e => { e.stopPropagation(); onChoose(rep.id, 'train'); }}>Train</button>
+        <button onClick={e => { e.stopPropagation(); onChoose(rep.id, 'browse'); }}>My Lines</button>
       </div>
     </div>
   );
