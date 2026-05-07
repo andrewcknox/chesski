@@ -259,6 +259,38 @@ a { color: var(--accent); }
 .folder-preview-board {
   flex: 0 0 auto;
   border: 1px solid var(--border);
+  width: 92px;
+  height: 92px;
+}
+.variation-folder {
+  margin-bottom: 8px;
+  border: 1px solid var(--border-dim);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-elev);
+}
+.variation-folder-head {
+  padding: 8px 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-elev-2);
+  font-size: 13px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.variation-folder-head:hover {
+  background: #343434;
+}
+.variation-folder-head .folder-preview-board {
+  width: 64px;
+  height: 64px;
+  border-radius: 2px;
+}
+.variation-folder-head .folder-title {
+  font-size: 13px;
+  font-weight: 600;
 }
 .folder-preview-board .board-wrap,
 .line-card-board .board-wrap {
@@ -1633,7 +1665,7 @@ a { color: var(--accent); }
 /* Layout adjustments to give the board more room */
 .app { max-width: 1500px; }
 .layout {
-  grid-template-columns: minmax(280px, min(var(--board-col, 640px), 58vw)) minmax(0, 1fr);
+  grid-template-columns: minmax(280px, clamp(280px, var(--board-col, 640px), 58vw)) minmax(0, 1fr);
 }
 
 details.collapsible { margin-top: 8px; }

@@ -65,13 +65,44 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
   const [loadingHistoryProgress, setLoadingHistoryProgress] = useState<ProgressByCard>({});
   const [loadingHistoryAnswerShown, setLoadingHistoryAnswerShown] = useState(false);
 
+  // "Two in the queue": pre-generate up to 2 lines in the background while the user trains,
+  // so subsequent Learn sessions start instantly without a loading screen.
+  const preGenRef = useRef<{ queue: GeneratedLine[]; abort: AbortController | null }>({ queue: [], abort: null });
+  const repertoireRef = useRef(repertoire);
+  repertoireRef.current = repertoire;
+
+  const kickPreGen = useCallback(() => {
+    if (preGenRef.current.abort) return; // already running
+    const controller = new AbortController();
+    preGenRef.current.abort = controller;
+    void (async () => {
+      try {
+        while (preGenRef.current.queue.length < 2 && !controller.signal.aborted) {
+          const line = await generateLearnLine(repertoireRef.current, 5, controller.signal);
+          if (!line || controller.signal.aborted) break;
+          preGenRef.current.queue = [...preGenRef.current.queue, line];
+        }
+      } catch {
+        // Best-effort — silent failure keeps the session working normally.
+      } finally {
+        preGenRef.current.abort = null;
+      }
+    })();
+  }, []);
+
   const reload = useCallback(async () => {
     const es = await getEdgesForRepertoire(repertoire.id);
     setAllEdges(es);
   }, [repertoire.id]);
 
   useEffect(() => { void reload(); }, [reload, refreshKey]);
-  useEffect(() => { setPhase({ kind: 'setup' }); setStats(emptyStats()); setQueuedPremove(null); }, [repertoire.id]);
+  useEffect(() => {
+    // Clear pre-gen queue and abort any in-flight generation when switching repertoires.
+    preGenRef.current.abort?.abort();
+    preGenRef.current = { queue: [], abort: null };
+    setPhase({ kind: 'setup' }); setStats(emptyStats()); setQueuedPremove(null);
+  }, [repertoire.id]);
+  useEffect(() => () => { preGenRef.current.abort?.abort(); }, []);
   useEffect(() => {
     (async () => setLoadingHistoryProgress(await getHistoryProgress()))();
   }, [refreshKey]);
@@ -144,6 +175,18 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
       return;
     }
     setLoadingHistoryAnswerShown(false);
+
+    // Use a pre-generated line if one is ready — no loading screen needed.
+    if (preGenRef.current.queue.length > 0) {
+      const line = preGenRef.current.queue[0];
+      preGenRef.current.queue = preGenRef.current.queue.slice(1);
+      kickPreGen(); // refill the queue
+      await reload();
+      onDataChange();
+      setPhase({ kind: 'line-ready', line, mode });
+      return;
+    }
+
     setPhase({ kind: 'generating', mode });
     let line: GeneratedLine | null;
     try {
@@ -154,7 +197,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
       return;
     }
     if (!line) {
-      setGenError('No frontier to learn — repertoire fully covered (or Lichess data unavailable).');
+      setGenError('Could not generate a line — the engine eval service may be unavailable. Try again in a moment.');
       setPhase({ kind: 'setup' });
       return;
     }
@@ -169,6 +212,8 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
       kind: 'walkthrough', line, cursorIdx: line.generationStartIndex, mode,
       sub: 'await', lastWrongUci: null, sameWrongCount: 0, wrongCount: 0,
     });
+    // Start pre-generating the next line(s) while the user trains this one.
+    kickPreGen();
   }
 
   async function gradeLoadingHistoryCard(cardId: string, knewIt: boolean) {

@@ -8,6 +8,7 @@
     "chesski": "npm run build && node scripts/chesski-server.cjs",
     "start": "node scripts/chesski-server.cjs",
     "build": "tsc -b && vite build",
+    "build:exe": "npm run build && npx @yao-pkg/pkg scripts/chesski-server.cjs --target node20-win-x64 --output release/Chesski.exe --icon public/chesski.ico",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -18,7 +19,11 @@
     "react-chessboard": "^5.10.0",
     "react-dom": "^19.2.5"
   },
+  "pkg": {
+    "assets": ["dist/**/*"]
+  },
   "devDependencies": {
+    "@yao-pkg/pkg": "^5.13.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",

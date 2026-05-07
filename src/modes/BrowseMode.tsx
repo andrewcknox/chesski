@@ -113,10 +113,25 @@ interface OpeningGroup {
   eco: string | null;
   name: string;
   lines: LineItem[];
+  subfolders: VariationFolder[];
 }
 
-function groupLines(lines: LineItem[]): OpeningGroup[] {
+interface VariationFolder {
+  fen: NormFen;
+  label: string; // the move(s) that led to this position
+  lines: LineItem[];
+  subfolders: VariationFolder[];
+}
+
+function groupLines(lines: LineItem[], edges: Edge[]): OpeningGroup[] {
   const map = new Map<string, OpeningGroup>();
+
+  // Build map of positions to their outgoing edges (for counting children)
+  const childCountByFen = new Map<NormFen, number>();
+  for (const e of edges) {
+    childCountByFen.set(e.parentFen, (childCountByFen.get(e.parentFen) ?? 0) + 1);
+  }
+
   for (const l of lines) {
     const key = l.categoryFen ?? '__none__';
     let g = map.get(key);
@@ -126,12 +141,47 @@ function groupLines(lines: LineItem[]): OpeningGroup[] {
         eco: l.categoryEco,
         name: l.categoryName ?? 'Unnamed positions',
         lines: [],
+        subfolders: [],
       };
       map.set(key, g);
     }
-    g.lines.push(l);
+
+    // Find branching point for this line
+    let branchingFen: NormFen | null = null;
+    let branchingLabel = '';
+    for (let i = 0; i < l.path.length; i++) {
+      const childCount = childCountByFen.get(l.path[i].childFen) ?? 0;
+      if (childCount >= 6) {
+        branchingFen = l.path[i].childFen;
+        branchingLabel = l.path[i].san;
+        break;
+      }
+    }
+
+    if (branchingFen) {
+      // Find or create subfolder for this branching point
+      let subfolder = g.subfolders.find(sf => sf.fen === branchingFen);
+      if (!subfolder) {
+        subfolder = {
+          fen: branchingFen,
+          label: branchingLabel,
+          lines: [],
+          subfolders: [],
+        };
+        g.subfolders.push(subfolder);
+      }
+      subfolder.lines.push(l);
+    } else {
+      // No branching point - goes to "other positions"
+      g.lines.push(l);
+    }
   }
-  // Sort groups by ECO code (alphabetical), unnamed last.
+
+  // Sort subfolders and groups
+  for (const g of map.values()) {
+    g.subfolders.sort((a, b) => a.label.localeCompare(b.label));
+  }
+
   const arr = Array.from(map.values());
   arr.sort((a, b) => {
     if (a.eco && b.eco) return a.eco.localeCompare(b.eco);
@@ -141,6 +191,7 @@ function groupLines(lines: LineItem[]): OpeningGroup[] {
   });
   return arr;
 }
+
 
 export interface BrowseModeProps {
   repertoire: Repertoire;
@@ -170,7 +221,7 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
   }, [repertoire.id, repertoire.rootFen]);
 
   const lines = useMemo(() => buildLines(repertoire.rootFen, edges), [repertoire.rootFen, edges]);
-  const groups = useMemo(() => groupLines(lines), [lines]);
+  const groups = useMemo(() => groupLines(lines, edges), [lines, edges]);
 
   // The displayed FEN: line's leaf if a line is selected; otherwise the manually-selected fen.
   const displayedFen = selectedLine
@@ -390,6 +441,14 @@ function formatLineEval(cp: number | null | undefined): string {
   return `${pawns >= 0 ? '+' : ''}${pawns.toFixed(2)}`;
 }
 
+function countAllLines(folder: OpeningGroup | VariationFolder): number {
+  let count = folder.lines.length;
+  for (const subfolder of folder.subfolders) {
+    count += countAllLines(subfolder);
+  }
+  return count;
+}
+
 function OpeningGroupView({ group, selectedLeafFen, onSelect, repertoireColor, boardThumbSize }: {
   group: OpeningGroup;
   selectedLeafFen: NormFen | null;
@@ -398,9 +457,11 @@ function OpeningGroupView({ group, selectedLeafFen, onSelect, repertoireColor, b
   boardThumbSize: number;
 }) {
   const [open, setOpen] = useState(false);
-  const previewLine = group.lines[0] ?? null;
+  const previewLine = group.lines[0] ?? group.subfolders[0]?.lines[0] ?? null;
   const previewFen = group.fen ?? previewLine?.leafFen ?? null;
   const previewOrientation: 'white' | 'black' = repertoireColor === 'w' ? 'white' : 'black';
+  const totalLineCount = countAllLines(group);
+
   return (
     <div className="opening-folder">
       <div
@@ -421,22 +482,116 @@ function OpeningGroupView({ group, selectedLeafFen, onSelect, repertoireColor, b
         )}
         <span className="folder-eco mono small muted">{group.eco ?? '-'}</span>
         <strong className="folder-title">{group.name}</strong>
-        <span className="folder-count muted small">{group.lines.length} line{group.lines.length === 1 ? '' : 's'}</span>
+        <span className="folder-count muted small">{totalLineCount} line{totalLineCount === 1 ? '' : 's'}</span>
         <span className="spacer" />
         <span className="folder-toggle muted small">{open ? 'v' : '>'}</span>
       </div>
       {open && (
-        <div className="opening-lines-grid">
-          {group.lines.map(l => (
-            <LineCard
-              key={l.leafFen + l.fullSan}
-              line={l}
-              selected={l.leafFen === selectedLeafFen}
-              onClick={() => onSelect(l)}
-              boardSize={boardThumbSize}
-            />
-          ))}
+        <>
+          {group.subfolders.length > 0 && (
+            <div style={{ paddingLeft: '12px' }}>
+              {group.subfolders.map(sf => (
+                <VariationFolderView
+                  key={sf.fen}
+                  folder={sf}
+                  selectedLeafFen={selectedLeafFen}
+                  onSelect={onSelect}
+                  repertoireColor={repertoireColor}
+                  boardThumbSize={boardThumbSize}
+                />
+              ))}
+            </div>
+          )}
+          {group.lines.length > 0 && (
+            <div>
+              {group.subfolders.length > 0 && (
+                <div style={{ padding: '8px 12px', fontSize: '12px', color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.05em' }}>
+                  Other positions
+                </div>
+              )}
+              <div className="opening-lines-grid">
+                {group.lines.map(l => (
+                  <LineCard
+                    key={l.leafFen + l.fullSan}
+                    line={l}
+                    selected={l.leafFen === selectedLeafFen}
+                    onClick={() => onSelect(l)}
+                    boardSize={boardThumbSize}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function VariationFolderView({ folder, selectedLeafFen, onSelect, repertoireColor, boardThumbSize }: {
+  folder: VariationFolder;
+  selectedLeafFen: NormFen | null;
+  onSelect: (l: LineItem) => void;
+  repertoireColor: Repertoire['color'];
+  boardThumbSize: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const previewLine = folder.lines[0] ?? folder.subfolders[0]?.lines[0] ?? null;
+  const previewFen = folder.fen;
+  const previewOrientation: 'white' | 'black' = repertoireColor === 'w' ? 'white' : 'black';
+  const totalLineCount = countAllLines(folder);
+
+  return (
+    <div className="variation-folder">
+      <div
+        onClick={() => setOpen(o => !o)}
+        className="variation-folder-head"
+      >
+        <div className="folder-preview-board" style={{ pointerEvents: 'none' }}>
+          <Board
+            fen={previewFen}
+            orientation={previewOrientation}
+            onMove={() => false}
+            allowMoves={false}
+            size={64}
+            showNotation={false}
+          />
         </div>
+        <strong className="folder-title">{folder.label}</strong>
+        <span className="folder-count muted small">{totalLineCount} line{totalLineCount === 1 ? '' : 's'}</span>
+        <span className="spacer" />
+        <span className="folder-toggle muted small">{open ? 'v' : '>'}</span>
+      </div>
+      {open && (
+        <>
+          {folder.subfolders.length > 0 && (
+            <div style={{ paddingLeft: '12px' }}>
+              {folder.subfolders.map(sf => (
+                <VariationFolderView
+                  key={sf.fen}
+                  folder={sf}
+                  selectedLeafFen={selectedLeafFen}
+                  onSelect={onSelect}
+                  repertoireColor={repertoireColor}
+                  boardThumbSize={boardThumbSize}
+                />
+              ))}
+            </div>
+          )}
+          {folder.lines.length > 0 && (
+            <div className="opening-lines-grid">
+              {folder.lines.map(l => (
+                <LineCard
+                  key={l.leafFen + l.fullSan}
+                  line={l}
+                  selected={l.leafFen === selectedLeafFen}
+                  onClick={() => onSelect(l)}
+                  boardSize={boardThumbSize}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

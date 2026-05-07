@@ -356,18 +356,15 @@ export interface PathStep {
   popularityFraction: number; // 1.0 for user moves; explorer fraction for opponent moves
 }
 
-// Build a frontier candidate by walking from rootFen. At each step:
-//   - If your turn:
-//       - If you have stored move(s), pick the most-popular opponent path... wait that's wrong.
-//       - Actually: if your turn and you have stored move(s), follow EACH stored your-move
-//         (for branch enumeration we'd fan out). For v1 simplicity: follow ANY one stored your-move
-//         (we'll try each as a separate candidate).
-//       - If your turn and NO stored move at this fen → THIS is a frontier.
-//   - If opponent turn:
-//       - If you have stored opponent moves at this fen, you've chosen which to handle. Walk
-//         each one as a separate candidate (weighted by its popularity fraction).
-//       - For non-stored opponent moves above the popularity threshold, we ALSO walk those (as
-//         implicit edges) — that's how we discover frontiers under unhandled branches.
+// Three-phase algorithm:
+//   Phase 1 — pure in-memory DFS through stored edges. No Lichess calls, no pruning.
+//             Collects type-1 frontiers (your turn, no stored move) and every
+//             opponent-to-move position for phase 2.
+//   Phase 2 — parallel Lichess queries at all opponent positions. Discovers type-2
+//             frontiers (unstored popular moves above the popularity threshold) and
+//             scores them by game count.
+//   Phase 3 — parallel Lichess queries at type-1 frontier FENs to score them by total
+//             games in the database. Pick the frontier with the most games.
 export async function findTopFrontier(rep: Repertoire, signal?: AbortSignal): Promise<FrontierResult | null> {
   const all = await getEdgesForRepertoire(rep.id);
   const byParent = new Map<NormFen, Edge[]>();
@@ -377,92 +374,110 @@ export async function findTopFrontier(rep: Repertoire, signal?: AbortSignal): Pr
     arr.push(e);
   }
 
-  const frontiers: FrontierResult[] = [];
+  // ── Phase 1: in-memory DFS ───────────────────────────────────────────────
+  type Candidate = { fen: NormFen; path: PathStep[]; games: number };
+  const type1: Candidate[] = [];
+  const opponentPositions: { fen: NormFen; path: PathStep[]; storedUcis: Set<string> }[] = [];
 
-  // Cap on total work to keep this responsive on large repertoires.
-  const NODE_BUDGET = 800;
-  let nodesVisited = 0;
+  const dfsStack: { fen: NormFen; path: PathStep[] }[] = [{ fen: rep.rootFen, path: [] }];
+  const visited = new Set<NormFen>();
 
-  type Stack = { fen: NormFen; weight: number; path: PathStep[] };
-  const stack: Stack[] = [{ fen: rep.rootFen, weight: 1, path: [] }];
+  while (dfsStack.length) {
+    if (signal?.aborted) return null;
+    const { fen, path } = dfsStack.pop()!;
+    if (visited.has(fen)) continue;
+    visited.add(fen);
 
-  while (stack.length && nodesVisited < NODE_BUDGET) {
-    if (signal?.aborted) break;
-    const cur = stack.pop()!;
-    nodesVisited++;
-    const turn = turnAt(cur.fen);
-    const stored = byParent.get(cur.fen) || [];
-    const isGameOver = chessFromFen(cur.fen).isGameOver();
-    if (isGameOver) continue;
+    const turn = turnAt(fen);
+    const stored = byParent.get(fen) ?? [];
+    if (chessFromFen(fen).isGameOver()) continue;
 
     if (turn === rep.color) {
-      // Your turn at this fen.
       if (stored.length === 0) {
-        // Frontier!
-        frontiers.push({ fen: cur.fen, cumulativeProbability: cur.weight, path: cur.path });
-        continue;
-      }
-      // Otherwise, follow each stored move (your moves).
-      for (const e of stored) {
-        if (e.mover !== rep.color) continue; // safety: shouldn't happen
-        stack.push({
-          fen: e.childFen,
-          weight: cur.weight, // your move doesn't change probability
-          path: [...cur.path, {
-            fromFen: e.parentFen, toFen: e.childFen, san: e.san, uci: e.uci, mover: e.mover, edge: e,
-            popularityFraction: 1,
-          }],
-        });
+        type1.push({ fen, path, games: 0 });
+      } else {
+        for (const e of stored) {
+          if (e.mover !== rep.color) continue;
+          dfsStack.push({
+            fen: e.childFen,
+            path: [...path, { fromFen: e.parentFen, toFen: e.childFen, san: e.san, uci: e.uci, mover: e.mover, edge: e, popularityFraction: 1 }],
+          });
+        }
       }
     } else {
-      // Opponent's turn. Walk both stored and unstored above-threshold opponent moves.
-      // For unstored, query the explorer for popularities (used as edge weights).
-      let opponentMoves: { san: string; uci: string; popularityFraction: number; isMistake: boolean; storedEdge: Edge | null }[];
-      if (stored.length > 0) {
-        // Use the popularities for each stored opponent move from the explorer.
-        let exp: LichessExplorerResponse | null = null;
-        try {
-          exp = await fetchExplorer(cur.fen, { source: 'lichess' }, signal);
-        } catch (e) {
-          if (e instanceof LichessAuthError) throw e;
-        }
-        const total = exp ? exp.white + exp.draws + exp.black : 0;
-        opponentMoves = stored.map(e => {
-          const m = exp?.moves.find(x => x.uci === e.uci);
-          const games = m ? m.white + m.draws + m.black : 0;
-          return {
-            san: e.san, uci: e.uci, popularityFraction: total > 0 && m ? games / total : 0,
-            isMistake: false, storedEdge: e,
-          };
-        });
-      } else {
-        // No stored opponent moves; enumerate top-popular ones from the explorer (don't walk
-        // mistake-tagged moves as deeply — but for frontier discovery we still walk them since
-        // they become Crushing-style branches the user needs to handle).
-        const top = await pickOpponentMoves(cur.fen, signal);
-        opponentMoves = top.map(t => ({ ...t, storedEdge: null }));
-      }
-      for (const om of opponentMoves) {
-        const result = applyMove(cur.fen, om.san);
-        if (!result) continue;
-        const newWeight = cur.weight * (om.popularityFraction || 0.01);
-        if (newWeight < 0.001) continue; // prune very-low-probability branches
-        stack.push({
-          fen: result.fen,
-          weight: newWeight,
-          path: [...cur.path, {
-            fromFen: cur.fen, toFen: result.fen, san: om.san, uci: om.uci, mover: result.mover,
-            edge: om.storedEdge, popularityFraction: om.popularityFraction,
-          }],
+      opponentPositions.push({ fen, path, storedUcis: new Set(stored.map(e => e.uci)) });
+      for (const e of stored) {
+        dfsStack.push({
+          fen: e.childFen,
+          path: [...path, { fromFen: e.parentFen, toFen: e.childFen, san: e.san, uci: e.uci, mover: e.mover, edge: e, popularityFraction: 0 }],
         });
       }
     }
   }
 
-  if (frontiers.length === 0) return null;
-  // Pick the highest-cumulative-probability frontier.
-  frontiers.sort((a, b) => b.cumulativeProbability - a.cumulativeProbability);
-  return frontiers[0];
+  // ── Phase 2: parallel Lichess queries at opponent positions ───────────────
+  // Discovers type-2 frontiers (unstored popular moves) and their game counts.
+  const type2: Candidate[] = [];
+  if (opponentPositions.length > 0) {
+    const explorerResults = await Promise.all(
+      opponentPositions.map(async ({ fen: oppFen, path: oppPath, storedUcis }) => {
+        try {
+          const data = await fetchExplorer(oppFen, { source: 'lichess' }, signal);
+          return { oppFen, oppPath, storedUcis, data };
+        } catch (e) {
+          if (e instanceof LichessAuthError) throw e;
+          return { oppFen, oppPath, storedUcis, data: null };
+        }
+      })
+    );
+
+    for (const { oppFen, oppPath, storedUcis, data } of explorerResults) {
+      if (!data) continue;
+      const total = data.white + data.draws + data.black;
+      if (total === 0) continue;
+      for (const m of data.moves) {
+        const frac = (m.white + m.draws + m.black) / total;
+        if (frac < TUNING.opponentPopularityFraction) continue;
+        if (storedUcis.has(m.uci)) continue; // already handled
+        const result = applyMove(oppFen, m.san);
+        if (!result) continue;
+        type2.push({
+          fen: result.fen,
+          path: [...oppPath, {
+            fromFen: oppFen, toFen: result.fen, san: m.san, uci: m.uci,
+            mover: turnAt(oppFen), edge: null, popularityFraction: frac,
+          }],
+          games: m.white + m.draws + m.black,
+        });
+      }
+    }
+  }
+
+  // ── Phase 3: score type-1 frontiers by Lichess game count ────────────────
+  const scoredType1 = await Promise.all(
+    type1.map(async (c) => {
+      try {
+        const data = await fetchExplorer(c.fen, { source: 'lichess' }, signal);
+        return { ...c, games: data ? data.white + data.draws + data.black : 0 };
+      } catch (e) {
+        if (e instanceof LichessAuthError) throw e;
+        return { ...c, games: 0 };
+      }
+    })
+  );
+
+  // Deduplicate by FEN across both types, keeping highest game count.
+  const byFen = new Map<NormFen, Candidate>();
+  for (const c of [...scoredType1, ...type2]) {
+    const existing = byFen.get(c.fen);
+    if (!existing || c.games > existing.games) byFen.set(c.fen, c);
+  }
+
+  const allCandidates = Array.from(byFen.values());
+  if (allCandidates.length === 0) return null;
+  allCandidates.sort((a, b) => b.games - a.games);
+  const winner = allCandidates[0];
+  return { fen: winner.fen, cumulativeProbability: winner.games, path: winner.path };
 }
 
 // ---------- Generate a learn-line ----------
@@ -489,7 +504,12 @@ export async function generateLearnLine(
   signal?: AbortSignal
 ): Promise<GeneratedLine | null> {
   const frontier = await findTopFrontier(rep, signal);
-  if (!frontier) return null;
+  if (!frontier) {
+    // No Lichess-based frontier found (repertoire fully covered by popular moves, or Lichess
+    // data unavailable). Fall back to Stockfish: extend from the deepest stored leaf using
+    // cloud eval for opponent moves.
+    return generateStockfishFallbackLine(rep, yourMoveBudget, signal);
+  }
 
   // Step 1: persist any implicit opponent edges along the path to the frontier.
   // These were "implicit" during traversal but should now exist as real edges so the
@@ -567,6 +587,89 @@ export async function generateLearnLine(
 
   if (yourMovesAdded === 0) return null;
   return { fullPath, newEdges, generationStartIndex };
+}
+
+// Stockfish-only line generation used when findTopFrontier returns null (Lichess unavailable or
+// repertoire fully covers all popular opponent responses). Walks to the deepest stored leaf and
+// extends from there using cloud eval for opponent moves and pickYourMove for user moves.
+async function generateStockfishFallbackLine(
+  rep: Repertoire,
+  yourMoveBudget: number,
+  signal?: AbortSignal
+): Promise<GeneratedLine | null> {
+  const all = await getEdgesForRepertoire(rep.id);
+  const byParent = new Map<NormFen, Edge[]>();
+  for (const e of all) {
+    const arr = byParent.get(e.parentFen) ?? [];
+    arr.push(e);
+    byParent.set(e.parentFen, arr);
+  }
+
+  // DFS from root to find the longest path (deepest leaf).
+  let bestPath: Edge[] = [];
+  const stack: { fen: NormFen; path: Edge[] }[] = [{ fen: rep.rootFen, path: [] }];
+  const visited = new Set<NormFen>();
+  while (stack.length) {
+    const { fen, path } = stack.pop()!;
+    if (visited.has(fen)) continue;
+    visited.add(fen);
+    const children = byParent.get(fen) ?? [];
+    if (children.length === 0 && path.length > bestPath.length) {
+      bestPath = path;
+      continue;
+    }
+    for (const e of children) stack.push({ fen: e.childFen, path: [...path, e] });
+  }
+
+  const fullPath: Edge[] = [...bestPath];
+  const newEdges: Edge[] = [];
+  const generationStartIndex = fullPath.length;
+  let cursorFen: NormFen = bestPath.length > 0 ? bestPath[bestPath.length - 1].childFen : rep.rootFen;
+  let yourMovesAdded = 0;
+
+  while (yourMovesAdded < yourMoveBudget) {
+    if (signal?.aborted) break;
+    const turn = turnAt(cursorFen);
+    if (chessFromFen(cursorFen).isGameOver()) break;
+
+    if (turn === rep.color) {
+      const pick = await pickYourMove(cursorFen, rep.color, signal);
+      if (!pick) break;
+      const existing = (await getEdgesFromParent(rep.id, cursorFen)).find(e => e.uci === pick.uci);
+      if (existing) {
+        const sourced = await attachMoveSource(existing, pick);
+        fullPath.push(sourced);
+        cursorFen = sourced.childFen;
+      } else {
+        const r = await playMoveInRepertoire(rep.id, cursorFen, pick.san);
+        if (!r) break;
+        const sourced = await attachMoveSource(r.edge, pick);
+        fullPath.push(sourced);
+        if (r.edgeCreated) newEdges.push(sourced);
+        cursorFen = sourced.childFen;
+      }
+      yourMovesAdded++;
+    } else {
+      // Opponent move via cloud eval (Lichess-independent).
+      const engine = await fetchCloudEval(cursorFen, TUNING.cloudEvalMultiPv, signal);
+      if (!engine || engine.pvs.length === 0) break;
+      const bestUci = engine.pvs[0].moves.split(' ')[0];
+      const existing = (await getEdgesFromParent(rep.id, cursorFen)).find(e => e.uci === bestUci);
+      if (existing) {
+        fullPath.push(existing);
+        cursorFen = existing.childFen;
+      } else {
+        const m = applyMove(cursorFen, uciToObj(bestUci));
+        if (!m) break;
+        const r = await playMoveInRepertoire(rep.id, cursorFen, m.san);
+        if (!r) break;
+        fullPath.push(r.edge);
+        cursorFen = r.edge.childFen;
+      }
+    }
+  }
+
+  return yourMovesAdded > 0 ? { fullPath, newEdges, generationStartIndex } : null;
 }
 
 export async function continueLearnLine(
