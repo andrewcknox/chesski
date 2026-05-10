@@ -120,6 +120,15 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
   const repertoireRef = useRef(repertoire);
   repertoireRef.current = repertoire;
 
+  const resetPreGen = useCallback((reason?: string) => {
+    const dropped = preGenRef.current.queue.length;
+    preGenRef.current.abort?.abort();
+    preGenRef.current = { queue: [], abort: null };
+    if (reason) {
+      setGenTrace(prev => [...prev, `pre-generation reset: ${reason}${dropped ? `; dropped ${dropped} queued line${dropped === 1 ? '' : 's'}` : ''}.`]);
+    }
+  }, []);
+
   const kickPreGen = useCallback(() => {
     if (preGenRef.current.abort) return; // already running
     const controller = new AbortController();
@@ -134,7 +143,9 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
       } catch {
         // Best-effort — silent failure keeps the session working normally.
       } finally {
-        preGenRef.current.abort = null;
+        if (preGenRef.current.abort === controller) {
+          preGenRef.current.abort = null;
+        }
       }
     })();
   }, [trainingPreferences.learnLineDepth]);
@@ -829,15 +840,23 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
       const latest = await getEdge(repertoire.id, edge.parentFen, edge.childFen);
       await putEdge(gradeLearnPass(latest ?? edge));
     }
+    resetPreGen('learned line completed; rebuilding frontier queue from the updated repertoire');
     await reload();
     onDataChange();
     setRebuildingFrontiers(true);
     try {
-      await rebuildFrontierQueue(repertoire);
+      const refreshed = await rebuildFrontierQueue(repertoire, undefined, (message) => {
+        setGenTrace(prev => [...prev, `frontier refresh after learn: ${message}`]);
+      });
       await reload();
+      setGenTrace(prev => [...prev, refreshed
+        ? `frontier refresh after learn: fresh queue ready from ${refreshed.fen}.`
+        : 'frontier refresh after learn: no open frontiers found after rebuild.'
+      ]);
     } finally {
       setRebuildingFrontiers(false);
     }
+    kickPreGen();
     setStats(s => ({ ...s, learnPassed: s.learnPassed + learnedEdges.length, linesLearned: s.linesLearned + 1 }));
     finishLine(p.mode);
   }
