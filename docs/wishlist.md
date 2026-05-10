@@ -11,6 +11,7 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 - Replace checkbox-style default-opening continuation picking with an immersive board-first flow: show the position, let the user play the move they know and want in their prep, validate it against pre-approved engine-checked/master-supported continuations, then return to earlier unresolved branches until the repertoire is filled in.
 - After a user selects a new opening to learn, bring them to the board and simulate the opening with them so Chesski can infer what prep they already know. This likely needs a stored database of opponent responses because live engine/API calls are too slow for a smooth setup flow.
 - Support downloaded top-player PGN bundles stored with the app instead of depending entirely on live API search.
+- Later, shrink the player-book bundle by moving exact source-game continuations out of `player-books.json` into compact per-player game files or source-game pointers. For now, keep the larger bundle because exact game stealing matters more than saving roughly 30 MB.
 - Start with a small player pack: Magnus Carlsen, Hikaru Nakamura, Fabiano Caruana, Garry Kasparov, Paul Morphy, and Bobby Fischer.
 - Add a stacked "play like these players" recommendation mode. For a position, check the user's priority players in order and prefer a move that player used successfully from the exact position. If the first player has no matching win or game, check the next player, then fall back to Masters data and engine evaluation.
 - Let users have more than one approved response in the same position, with study modes such as main line, sideline, or any prepared move.
@@ -33,6 +34,7 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 - When the user gets the last move wrong in a learning line, show clear wrong-answer feedback and show the correct move.
 - Make "Learn + Review" always include review work. If no cards are due, pull some not-due cards as fallback review.
 - During learning or reviewing sessions, hide the other top-level navigation headings because clicking away mid-session usually does not make sense.
+- Add a flow-state mode where the top tabs are blocked or hidden and Chesski cycles through Learn and Review sessions until the user explicitly ends the flow.
 - Add a transition that sweeps across the board when Chesski switches from learning to reviewing.
 - Investigate why a generated learning line sometimes has only 3 new moves instead of the expected 5.
 - Improve the repeated-wrong-move switch prompt: let the user click "Use X instead" or "Stick with Y" immediately while the engine comparison loads, rather than blocking the session on "Checking with the engine."
@@ -53,6 +55,7 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 - Add chess piece animation speed customizability, separately configurable for teaching and quiz/training.
 - Toggle highlighting legal moves.
 - Toggle piece sound.
+- Add light mode and dark mode.
 
 ## Opening Discovery And Recommendations
 
@@ -63,6 +66,7 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 
 - Add chess quote cards like agadmator video quotes. Each quote card should have two clozes: who said it and a critical word in the quote.
 - Generally beautify the website so it is pleasant to look at and feels good to use.
+- Add little icons for the players' heads in player/source lists.
 - Redesign the desktop/app icon from a stronger source asset. The current skier/knight mark does not read clearly enough as either a knight or a ski pole at desktop size.
 - Add more ADD-friendly animations that make the app feel rewarding and alive without slowing down fast training.
 - Add an Anki/GitHub-style heat map for daily activity, including reviews and new cards.

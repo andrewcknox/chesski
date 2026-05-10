@@ -41,6 +41,7 @@ export class LichessAuthError extends Error {
 const META_TOKEN_KEY = 'lichess_token';
 const explorerCache = new Map<string, LichessExplorerResponse>();
 const evalCache = new Map<NormFen, CloudEvalResponse | null>();
+const localEvalCache = new Map<string, CloudEvalResponse | null>();
 let _tokenCache: string | null | undefined = undefined;
 
 export async function getLichessToken(): Promise<string | null> {
@@ -121,6 +122,9 @@ export async function fetchExplorerDefault(normFen: NormFen, signal?: AbortSigna
 // Cloud-eval. Returns null if Lichess has no analyzed result for this position (404).
 // No token required.
 export async function fetchCloudEval(normFen: NormFen, multiPv = 5, signal?: AbortSignal): Promise<CloudEvalResponse | null> {
+  const local = await fetchLocalStockfishEval(normFen, multiPv, signal);
+  if (local) return local;
+
   const cached = evalCache.get(normFen);
   if (cached !== undefined) return cached;
   const fen = denormalizeFen(normFen);
@@ -141,7 +145,37 @@ export async function fetchCloudEval(normFen: NormFen, multiPv = 5, signal?: Abo
   return data;
 }
 
+async function fetchLocalStockfishEval(normFen: NormFen, multiPv = 5, signal?: AbortSignal): Promise<CloudEvalResponse | null> {
+  const cacheKey = JSON.stringify({ fen: normFen, multiPv });
+  const cached = localEvalCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  let res: Response;
+  try {
+    res = await fetch('/api/stockfish/eval', {
+      method: 'POST',
+      signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fen: normFen, multiPv }),
+    });
+  } catch {
+    localEvalCache.set(cacheKey, null);
+    return null;
+  }
+  if (!res.ok) {
+    localEvalCache.set(cacheKey, null);
+    return null;
+  }
+  const data = (await res.json()) as CloudEvalResponse;
+  if (!data.pvs?.length) {
+    localEvalCache.set(cacheKey, null);
+    return null;
+  }
+  localEvalCache.set(cacheKey, data);
+  return data;
+}
+
 export function clearLichessCache(): void {
   explorerCache.clear();
   evalCache.clear();
+  localEvalCache.clear();
 }

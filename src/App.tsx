@@ -10,7 +10,9 @@ import { AccountMode } from './modes/AccountMode';
 import { SettingsMode } from './modes/SettingsMode';
 import { Board } from './components/Board';
 import { TokenModal } from './components/TokenModal';
-import { getCurrentAccount, restoreCurrentAccount, syncCurrentAccount } from './lib/accounts';
+import { BoardPreferencesProvider } from './lib/boardPreferences';
+import { TrainingPreferencesProvider } from './lib/trainingPreferences';
+import { getCurrentAccount, restoreCurrentAccount, runStartupMigrations, syncCurrentAccount } from './lib/accounts';
 import {
   exportAll, importAll, type ExportData,
   listRepertoires, createRepertoire, createRepertoireFromFen,
@@ -33,7 +35,7 @@ const META_LAST_REP = 'last_repertoire_id';
 const META_BOARD_SIZE = 'board_size';
 const DEFAULT_BOARD_SIZE = 640;
 
-function App() {
+function AppContent() {
   const [tab, setTab] = useState<Tab>('home');
   const [refreshKey, setRefreshKey] = useState(0);
   const [dueCount, setDueCount] = useState(0);
@@ -59,6 +61,7 @@ function App() {
   // Initial load
   useEffect(() => {
     (async () => {
+      await runStartupMigrations();
       const tok = await getLichessToken();
       setHasToken(!!tok);
       setTokenChecked(true);
@@ -756,3 +759,13 @@ function NewRepertoireCreator({ repertoires, onCreated, compact }: {
 }
 
 export default App;
+
+function App() {
+  return (
+    <BoardPreferencesProvider>
+      <TrainingPreferencesProvider>
+        <AppContent />
+      </TrainingPreferencesProvider>
+    </BoardPreferencesProvider>
+  );
+}

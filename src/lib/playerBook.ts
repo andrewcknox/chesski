@@ -15,12 +15,25 @@ interface BookCandidate {
   winExamples?: string[];
   drawExamples?: string[];
   lossExamples?: string[];
+  sourceLine?: PlayerBookSourceLine;
 }
 
 interface MutableBookCandidate extends BookCandidate {
   winExamples: string[];
   drawExamples: string[];
   lossExamples: string[];
+  sourceLineRank?: number;
+}
+
+export interface PlayerBookSourceMove {
+  san: string;
+  uci: string;
+  color: Color;
+}
+
+export interface PlayerBookSourceLine {
+  label: string;
+  moves: PlayerBookSourceMove[];
 }
 
 interface PlayerBookJson {
@@ -65,6 +78,7 @@ export interface PlayerBookPick {
   net: number;
   scoreRate: number;
   sourceGameName: string | null;
+  sourceLine?: PlayerBookSourceLine;
 }
 
 export interface PlayerBookStats {
@@ -114,6 +128,7 @@ export async function getPlayerBookMoves(playerKey: PlayerKey, fen: NormFen, col
     net: candidate.wins - candidate.losses,
     scoreRate: resultScoreRate(candidate),
     sourceGameName: candidate.winExamples?.[0] ?? candidate.examples?.[0] ?? null,
+    sourceLine: candidate.sourceLine,
   }));
 }
 
@@ -221,7 +236,7 @@ function buildBookFromPgn(pgn: string, matchName: string): StoredUserBook {
     const label = gameLabel(headers);
 
     const moves = chess.history({ verbose: true }).slice(0, MAX_IMPORT_PLIES);
-    for (const move of moves) {
+    for (const [idx, move] of moves.entries()) {
       if (move.color !== color) continue;
       const key = colorFenKey(color, normalizeFen(move.before));
       let byMove = positions.get(key);
@@ -237,6 +252,11 @@ function buildBookFromPgn(pgn: string, matchName: string): StoredUserBook {
       stats[bucket]++;
       const examples = bucket === 'wins' ? stats.winExamples : bucket === 'draws' ? stats.drawExamples : stats.lossExamples;
       if (examples.length < 3 && !examples.includes(label)) examples.push(label);
+      const rank = bucketRank(bucket);
+      if (!stats.sourceLine || rank > (stats.sourceLineRank ?? 0)) {
+        stats.sourceLine = sourceLineFromMoves(label, moves, idx);
+        stats.sourceLineRank = rank;
+      }
     }
   }
 
@@ -245,7 +265,7 @@ function buildBookFromPgn(pgn: string, matchName: string): StoredUserBook {
     const moves = Array.from(byMove.values())
       .filter(isCandidateTakeable)
       .sort(compareCandidates)
-      .map(m => ({ ...m, scoreRate: resultScoreRate(m) }));
+      .map(({ sourceLineRank, ...m }) => ({ ...m, scoreRate: resultScoreRate(m) }));
     if (moves.length > 0) entries.push([key, moves]);
   }
 
@@ -260,6 +280,23 @@ function buildBookFromPgn(pgn: string, matchName: string): StoredUserBook {
     positions: entries.length,
     entries,
   };
+}
+
+function sourceLineFromMoves(label: string, moves: Array<{ san: string; lan: string; color: Color }>, startIndex: number): PlayerBookSourceLine {
+  return {
+    label,
+    moves: moves.slice(startIndex, startIndex + 10).map(move => ({
+      san: move.san,
+      uci: move.lan,
+      color: move.color,
+    })),
+  };
+}
+
+function bucketRank(bucket: 'wins' | 'draws' | 'losses'): number {
+  if (bucket === 'wins') return 3;
+  if (bucket === 'draws') return 2;
+  return 1;
 }
 
 function splitGames(pgn: string): string[] {

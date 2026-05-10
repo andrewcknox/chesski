@@ -1,9 +1,24 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Board } from '../components/Board';
-import { applyMove, turnAt } from '../lib/chess';
-import { continueLearnLine, generateLearnLine, evaluateMoveCpLoss, pvCpForColor, TUNING, type GeneratedLine } from '../lib/autosuggest';
+import { applyMove, computeOpeningFen, turnAt, STARTING_FEN_NORM } from '../lib/chess';
+import { findOpening } from '../lib/openings';
+import {
+  continueLearnLine,
+  generateLearnLine,
+  getPrepMoveWarning,
+  getPrepOpponentBranches,
+  rebuildFrontierQueue,
+  savePrepStopFrontier,
+  evaluateMoveCpLoss,
+  pvCpForColor,
+  TUNING,
+  type GeneratedLine,
+  type GenerationTrace,
+  type PrepMoveWarning,
+  type PrepOpponentBranch,
+} from '../lib/autosuggest';
 import { fetchCloudEval } from '../lib/lichess';
-import { getEdge, getEdgesByMover, getEdgesForRepertoire, putEdge, swapMoveInRepertoire } from '../lib/storage';
+import { addMovesToRepertoire, CURATED_OPENINGS, getEdge, getEdgesByMover, getEdgesForRepertoire, getEdgesFromParent, getFrontiersForRepertoire, markCuratedOpeningScaffolds, playMoveInRepertoire, putEdge, swapMoveInRepertoire } from '../lib/storage';
 import { gradeFail, gradeLearnPass, gradePass, isDue } from '../lib/srs';
 import {
   buildHistoryCardStates,
@@ -15,16 +30,40 @@ import {
   type HistoryCardState,
   type ProgressByCard,
 } from '../lib/historySrs';
-import type { Edge, Repertoire } from '../types';
+import { useTrainingPreferences } from '../lib/trainingPreferences';
+import type { Edge, FrontierCandidate, NormFen, Repertoire } from '../types';
 
 type SessionMode = 'learn-and-review' | 'learn-only' | 'review-only';
 type Sub = 'await' | 'bad-flash' | 'good-flash';
 type PillState = 'pending' | 'current' | 'done' | 'failed';
 
+interface PrepBranch extends PrepOpponentBranch {
+  path: Edge[];
+  depth: number;
+  weight: number;
+}
+
+interface PrepMapStats {
+  movesMapped: number;
+  frontiersCreated: number;
+  branchesExplored: number;
+  deepestPly: number;
+}
+
+interface PrepPendingMove {
+  from: string;
+  to: string;
+  promotion?: string;
+  san: string;
+  uci: string;
+}
+
 type Phase =
   | { kind: 'setup' }
   | { kind: 'generating'; mode: SessionMode }
   | { kind: 'line-ready'; line: GeneratedLine; mode: SessionMode }
+  | { kind: 'prep-map'; cursorFen: NormFen; path: Edge[]; queue: PrepBranch[]; stats: PrepMapStats; loading: boolean; message: string | null }
+  | { kind: 'prep-confirm'; state: Extract<Phase, { kind: 'prep-map' }>; move: PrepPendingMove; warning: PrepMoveWarning }
   | { kind: 'walkthrough'; line: GeneratedLine; cursorIdx: number; mode: SessionMode; sub: Sub; lastWrongUci: string | null; sameWrongCount: number; wrongCount: number }
   | { kind: 'override-prompt'; line: GeneratedLine; cursorIdx: number; mode: SessionMode; bestSan: string; attemptedSan: string; attemptedUci: string; cpLoss: number | null; resolving: boolean; comesFrom: 'walkthrough' | 'test' }
   | { kind: 'test'; line: GeneratedLine; cursorIdx: number; gradedEdges: Set<string>; passHadError: boolean; passNumber: number; mode: SessionMode; sub: Sub; lastWrongUci: string | null; sameWrongCount: number; wrongCount: number }
@@ -41,7 +80,6 @@ interface SessionStats {
   linesLearned: number;
 }
 
-const REVIEW_QUEUE_CAP = 10;
 const OPP_AUTOPLAY_DELAY_MS = 80;
 const BAD_FLASH_MS = 110;
 const HINT_AFTER_WRONG_COUNT = 1;
@@ -56,10 +94,17 @@ export interface TrainModeProps {
 }
 
 export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onBoardSizeChange }: TrainModeProps) {
+  const { preferences: trainingPreferences } = useTrainingPreferences();
   const [phase, setPhase] = useState<Phase>({ kind: 'setup' });
   const [stats, setStats] = useState<SessionStats>(emptyStats());
   const [allEdges, setAllEdges] = useState<Edge[]>([]);
   const [genError, setGenError] = useState<string | null>(null);
+  const [genTrace, setGenTrace] = useState<string[]>([]);
+  const [genTraceCopyStatus, setGenTraceCopyStatus] = useState<string | null>(null);
+  const [frontierQueue, setFrontierQueue] = useState<FrontierCandidate[]>([]);
+  const [frontierCopyStatus, setFrontierCopyStatus] = useState<string | null>(null);
+  const [rebuildingFrontiers, setRebuildingFrontiers] = useState(false);
+  const [prepOpeningKey, setPrepOpeningKey] = useState<string>(() => repertoire.openingKey ?? '');
   const [queuedPremove, setQueuedPremove] = useState<{ from: string; to: string; promotion?: string } | null>(null);
   const [animateComputerMove, setAnimateComputerMove] = useState(false);
   const [loadingHistoryProgress, setLoadingHistoryProgress] = useState<ProgressByCard>({});
@@ -78,7 +123,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     void (async () => {
       try {
         while (preGenRef.current.queue.length < 2 && !controller.signal.aborted) {
-          const line = await generateLearnLine(repertoireRef.current, 5, controller.signal);
+          const line = await generateLearnLine(repertoireRef.current, trainingPreferences.learnLineDepth, controller.signal);
           if (!line || controller.signal.aborted) break;
           preGenRef.current.queue = [...preGenRef.current.queue, line];
         }
@@ -88,11 +133,15 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
         preGenRef.current.abort = null;
       }
     })();
-  }, []);
+  }, [trainingPreferences.learnLineDepth]);
 
   const reload = useCallback(async () => {
-    const es = await getEdgesForRepertoire(repertoire.id);
+    const [es, frontiers] = await Promise.all([
+      getEdgesForRepertoire(repertoire.id),
+      getFrontiersForRepertoire(repertoire.id),
+    ]);
     setAllEdges(es);
+    setFrontierQueue(frontiers);
   }, [repertoire.id]);
 
   useEffect(() => { void reload(); }, [reload, refreshKey]);
@@ -101,8 +150,14 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     preGenRef.current.abort?.abort();
     preGenRef.current = { queue: [], abort: null };
     setPhase({ kind: 'setup' }); setStats(emptyStats()); setQueuedPremove(null);
+    setFrontierCopyStatus(null);
+    setPrepOpeningKey(repertoire.openingKey ?? '');
   }, [repertoire.id]);
   useEffect(() => () => { preGenRef.current.abort?.abort(); }, []);
+  useEffect(() => {
+    preGenRef.current.abort?.abort();
+    preGenRef.current = { queue: [], abort: null };
+  }, [trainingPreferences.learnLineDepth]);
   useEffect(() => {
     (async () => setLoadingHistoryProgress(await getHistoryProgress()))();
   }, [refreshKey]);
@@ -113,6 +168,14 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
   }, [allEdges, repertoire.color]);
 
   const branchCount = useMemo(() => countBranches(repertoire.rootFen, allEdges), [repertoire.rootFen, allEdges]);
+  const prepOpeningOptions = useMemo(
+    () => CURATED_OPENINGS.filter(opening => opening.color === repertoire.color),
+    [repertoire.color]
+  );
+  const selectedPrepOpening = useMemo(
+    () => prepOpeningOptions.find(opening => opening.key === prepOpeningKey) ?? null,
+    [prepOpeningKey, prepOpeningOptions]
+  );
 
   // Auto-advance opponent moves and bad-flash recovery.
   const phaseRef = useRef(phase);
@@ -170,7 +233,19 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
   async function startSession(mode: SessionMode) {
     setStats(emptyStats());
     setGenError(null);
+    setGenTrace([]);
+    setGenTraceCopyStatus(null);
+    const traceStartedAt = performance.now();
+    let traceIndex = 0;
+    const trace: GenerationTrace = (message) => {
+      const elapsed = ((performance.now() - traceStartedAt) / 1000).toFixed(2).padStart(6, ' ');
+      traceIndex += 1;
+      const line = `${String(traceIndex).padStart(3, '0')} +${elapsed}s ${message}`;
+      setGenTrace(prev => [...prev, line]);
+    };
+    trace(`Session requested: mode=${mode}, repertoire="${repertoire.name}", color=${repertoire.color}, root=${repertoire.rootFen}`);
     if (mode === 'review-only') {
+      trace('Review-only mode selected; line generation skipped.');
       void enterReviewPhase(mode);
       return;
     }
@@ -178,11 +253,13 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
 
     // Use a pre-generated line if one is ready — no loading screen needed.
     if (preGenRef.current.queue.length > 0) {
+      trace(`Using pre-generated line from queue; queuedLines=${preGenRef.current.queue.length}.`);
       const line = preGenRef.current.queue[0];
       preGenRef.current.queue = preGenRef.current.queue.slice(1);
       kickPreGen(); // refill the queue
       await reload();
       onDataChange();
+      trace(`Pre-generated line ready: fullPath=${line.fullPath.length}, newEdges=${line.newEdges.length}, generationStartIndex=${line.generationStartIndex}.`);
       setPhase({ kind: 'line-ready', line, mode });
       return;
     }
@@ -190,20 +267,280 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     setPhase({ kind: 'generating', mode });
     let line: GeneratedLine | null;
     try {
-      line = await generateLearnLine(repertoire);
+      line = await generateLearnLine(repertoire, trainingPreferences.learnLineDepth, undefined, trace);
     } catch (e) {
+      trace(`Generation threw: ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`);
       setGenError(e instanceof Error ? e.message : String(e));
       setPhase({ kind: 'setup' });
       return;
     }
     if (!line) {
-      setGenError('Could not generate a line — the engine eval service may be unavailable. Try again in a moment.');
+      trace('Generation returned null.');
+      setGenError('Could not generate a line from this repertoire yet. Chesski could not find a frontier or a usable opponent continuation.');
+      await reload();
       setPhase({ kind: 'setup' });
       return;
     }
     await reload();
     onDataChange();
+    trace(`Generation succeeded: fullPath=${line.fullPath.length}, newEdges=${line.newEdges.length}, generationStartIndex=${line.generationStartIndex}.`);
     setPhase({ kind: 'line-ready', line, mode });
+  }
+
+  async function copyGenerationTrace() {
+    const text = genTrace.join('\n');
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setGenTraceCopyStatus('Copied');
+    } catch {
+      setGenTraceCopyStatus('Copy failed; select the text below');
+    }
+  }
+
+  async function refreshFrontierQueue() {
+    setRebuildingFrontiers(true);
+    setFrontierCopyStatus(null);
+    try {
+      await rebuildFrontierQueue(repertoire, undefined, (message) => {
+        setGenTrace(prev => [...prev, `frontier refresh: ${message}`]);
+      });
+      await reload();
+    } catch (e) {
+      setGenError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRebuildingFrontiers(false);
+    }
+  }
+
+  async function copyFrontierQueue() {
+    const text = frontierQueue.map((frontier, idx) => [
+      `${idx + 1}. ${frontier.status.toUpperCase()} ${frontier.san} (${frontier.uci})`,
+      `source=${frontier.source}`,
+      `weight=${frontier.weight.toFixed(5)}`,
+      `games=${frontier.games}`,
+      `popularity=${frontier.popularityFraction.toFixed(3)}`,
+      `parentFen=${frontier.parentFen}`,
+      `childFen=${frontier.childFen}`,
+      `reason=${frontier.lastReason ?? ''}`,
+    ].join(' | ')).join('\n');
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setFrontierCopyStatus('Copied');
+    } catch {
+      setFrontierCopyStatus('Copy failed');
+    }
+  }
+
+  async function startPrepMap() {
+    preGenRef.current.abort?.abort();
+    preGenRef.current = { queue: [], abort: null };
+    setGenError(null);
+    setGenTrace([]);
+    setFrontierCopyStatus(null);
+    const prepared = await preparePrepOpeningStart();
+    if (!prepared) return;
+    const initial: Extract<Phase, { kind: 'prep-map' }> = {
+      kind: 'prep-map',
+      cursorFen: prepared.cursorFen,
+      path: prepared.path,
+      queue: [],
+      stats: { ...emptyPrepStats(), deepestPly: prepared.path.length },
+      loading: true,
+      message: `Mapping ${prepared.name}. Finding the first opponent branch...`,
+    };
+    setPhase(initial);
+    await advancePrepMap(initial);
+  }
+
+  async function preparePrepOpeningStart(): Promise<{ cursorFen: NormFen; path: Edge[]; name: string } | null> {
+    const opening = selectedPrepOpening;
+    if (!opening) return { cursorFen: repertoire.rootFen, path: [], name: repertoire.name };
+    const openingFen = computeOpeningFen(opening.moves);
+
+    if (repertoire.rootFen !== STARTING_FEN_NORM && repertoire.rootFen !== openingFen) {
+      setGenError(`"${repertoire.name}" starts from a different opening position. To map ${opening.name} inside a multi-opening repertoire, choose a main repertoire that starts from the normal initial position.`);
+      return null;
+    }
+
+    if (repertoire.rootFen === STARTING_FEN_NORM) {
+      try {
+        await addMovesToRepertoire(repertoire, opening.moves, { scaffoldPlyCount: opening.moves.length });
+        await markCuratedOpeningScaffolds(repertoire);
+      } catch (e) {
+        setGenError(e instanceof Error ? e.message : String(e));
+        return null;
+      }
+    }
+
+    const path: Edge[] = [];
+    let cursorFen = repertoire.rootFen;
+    if (cursorFen === STARTING_FEN_NORM) {
+      for (const move of opening.moves) {
+        const applied = applyMove(cursorFen, move);
+        if (!applied) break;
+        const edge = await getEdge(repertoire.id, cursorFen, applied.fen);
+        if (edge) path.push(edge);
+        cursorFen = applied.fen;
+      }
+    }
+    return { cursorFen: openingFen, path, name: opening.name };
+  }
+
+  async function enqueuePrepBranches(state: Extract<Phase, { kind: 'prep-map' }>): Promise<PrepBranch[]> {
+    if (turnAt(state.cursorFen) === repertoire.color) return state.queue;
+    try {
+      const branches = await getPrepOpponentBranches(state.cursorFen);
+      const existingKeys = new Set(state.queue.map(prepBranchKey));
+      const next = [...state.queue];
+      for (const branch of branches) {
+        const key = `${branch.parentFen}::${branch.uci}`;
+        if (existingKeys.has(key)) continue;
+        existingKeys.add(key);
+        next.push({
+          ...branch,
+          path: state.path,
+          depth: state.path.length,
+          weight: branch.popularityFraction,
+        });
+      }
+      return next;
+    } catch (e) {
+      setGenError(e instanceof Error ? e.message : String(e));
+      return state.queue;
+    }
+  }
+
+  async function advancePrepMap(rawState: Extract<Phase, { kind: 'prep-map' }>) {
+    let state = { ...rawState, loading: true };
+    let queue = await enqueuePrepBranches(state);
+    for (let attempts = 0; attempts < 80; attempts++) {
+      const selected = choosePrepBranch(queue);
+      if (!selected) {
+        setPhase({
+          ...state,
+          queue: [],
+          loading: false,
+          message: 'Prep map complete for the current popularity threshold.',
+        });
+        await reload();
+        return;
+      }
+      queue = queue.filter(branch => prepBranchKey(branch) !== prepBranchKey(selected));
+      const played = await playMoveInRepertoire(repertoire.id, selected.parentFen, {
+        from: selected.uci.slice(0, 2),
+        to: selected.uci.slice(2, 4),
+        promotion: selected.uci.length > 4 ? selected.uci.slice(4) : undefined,
+      });
+      if (!played) continue;
+      const opponentPath = [...selected.path, played.edge];
+      const stats = {
+        ...state.stats,
+        branchesExplored: state.stats.branchesExplored + 1,
+        deepestPly: Math.max(state.stats.deepestPly, opponentPath.length),
+      };
+      const storedReplies = (await getEdgesFromParent(repertoire.id, played.edge.childFen))
+        .filter(edge => edge.mover === repertoire.color && !edge.isScaffold);
+      if (storedReplies.length > 0) {
+        const reply = storedReplies[0];
+        const followed: Extract<Phase, { kind: 'prep-map' }> = {
+          kind: 'prep-map',
+          cursorFen: reply.childFen,
+          path: [...opponentPath, reply],
+          queue,
+          stats: { ...stats, deepestPly: Math.max(stats.deepestPly, opponentPath.length + 1) },
+          loading: true,
+          message: `Following stored response ${reply.san}.`,
+        };
+        state = followed;
+        queue = await enqueuePrepBranches(followed);
+        continue;
+      }
+      setPhase({
+        kind: 'prep-map',
+        cursorFen: played.edge.childFen,
+        path: opponentPath,
+        queue,
+        stats,
+        loading: false,
+        message: `Opponent played ${played.edge.san}. Show Chesski your prep, or press Not sure.`,
+      });
+      await reload();
+      return;
+    }
+    setPhase({ ...state, queue, loading: false, message: 'Prep map paused after a long branch search.' });
+  }
+
+  function attemptPrepMove(move: { from: string; to: string; promotion?: string }): boolean {
+    const p = phaseRef.current;
+    if (p.kind !== 'prep-map') return false;
+    if (p.loading || turnAt(p.cursorFen) !== repertoire.color) return false;
+    const applied = applyMove(p.cursorFen, move);
+    if (!applied || applied.mover !== repertoire.color) return false;
+    const pending: PrepPendingMove = { ...move, san: applied.san, uci: applied.uci };
+    const stableState = { ...p, loading: false };
+    setPhase({ ...p, loading: true, message: `Checking ${applied.san} in the database...` });
+    void (async () => {
+      try {
+        const warning = await getPrepMoveWarning(p.cursorFen, applied.uci, repertoire.color);
+        if (warning) {
+          setPhase({ kind: 'prep-confirm', state: stableState, move: pending, warning });
+          return;
+        }
+      } catch (e) {
+        setGenError(e instanceof Error ? e.message : String(e));
+      }
+      await commitPrepMove(stableState, pending);
+    })();
+    return true;
+  }
+
+  async function commitPrepMove(state: Extract<Phase, { kind: 'prep-map' }>, move: PrepPendingMove) {
+    const played = await playMoveInRepertoire(repertoire.id, state.cursorFen, move);
+    if (!played) {
+      setPhase({ ...state, loading: false, message: `Could not store ${move.san}. Try another move.` });
+      return;
+    }
+    const nextState: Extract<Phase, { kind: 'prep-map' }> = {
+      kind: 'prep-map',
+      cursorFen: played.edge.childFen,
+      path: [...state.path, played.edge],
+      queue: state.queue,
+      stats: {
+        ...state.stats,
+        movesMapped: state.stats.movesMapped + (played.edgeCreated ? 1 : 0),
+        deepestPly: Math.max(state.stats.deepestPly, state.path.length + 1),
+      },
+      loading: true,
+      message: `Stored ${played.edge.san}. Finding the closest related branch...`,
+    };
+    await reload();
+    onDataChange();
+    await advancePrepMap(nextState);
+  }
+
+  async function stopPrepHere(stateOverride?: Extract<Phase, { kind: 'prep-map' }>) {
+    const p = stateOverride ?? phaseRef.current;
+    if (p.kind !== 'prep-map') return;
+    if (turnAt(p.cursorFen) !== repertoire.color) {
+      await advancePrepMap({ ...p, loading: true, message: 'Skipping to the next branch...' });
+      return;
+    }
+    const saved = await savePrepStopFrontier(repertoire, p.path, p.cursorFen);
+    const nextStats = {
+      ...p.stats,
+      frontiersCreated: p.stats.frontiersCreated + (saved ? 1 : 0),
+      deepestPly: Math.max(p.stats.deepestPly, p.path.length),
+    };
+    await reload();
+    onDataChange();
+    await advancePrepMap({
+      ...p,
+      stats: nextStats,
+      loading: true,
+      message: saved ? 'Frontier stored. Finding the closest related branch...' : 'No opponent move led here, so no frontier was stored.',
+    });
   }
 
   function studyPreparedLine(line: GeneratedLine, mode: SessionMode) {
@@ -227,7 +564,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
 
   async function enterReviewPhase(mode: SessionMode) {
     const fresh = await getEdgesByMover(repertoire.id, repertoire.color);
-    const queue = buildReviewQueue(fresh, mode === 'learn-and-review');
+    const queue = buildReviewQueue(fresh, mode === 'learn-and-review', trainingPreferences.reviewSessionLength);
     if (queue.length === 0) {
       setPhase({ kind: 'done', mode });
       return;
@@ -444,7 +781,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
 
   async function reloadAndEnterReview(mode: SessionMode) {
     const fresh = await getEdgesByMover(repertoire.id, repertoire.color);
-    const queue = buildReviewQueue(fresh, mode === 'learn-and-review');
+    const queue = buildReviewQueue(fresh, mode === 'learn-and-review', trainingPreferences.reviewSessionLength);
     if (queue.length === 0) {
       setPhase({ kind: 'done', mode });
       return;
@@ -460,6 +797,13 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     }
     await reload();
     onDataChange();
+    setRebuildingFrontiers(true);
+    try {
+      await rebuildFrontierQueue(repertoire);
+      await reload();
+    } finally {
+      setRebuildingFrontiers(false);
+    }
     setStats(s => ({ ...s, learnPassed: s.learnPassed + learnedEdges.length, linesLearned: s.linesLearned + 1 }));
     finishLine(p.mode);
   }
@@ -547,6 +891,12 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
   // ---------- Render ----------
 
   const orientation: 'white' | 'black' = repertoire.color === 'w' ? 'white' : 'black';
+  const openingPreamble = useMemo(() => {
+    if (repertoire.rootFen === STARTING_FEN_NORM || !repertoire.openingKey) return null;
+    const opening = findOpening(repertoire.openingKey);
+    if (!opening) return null;
+    return formatOpeningMoves(opening.moves);
+  }, [repertoire.rootFen, repertoire.openingKey]);
 
   if (phase.kind === 'setup') {
     return (
@@ -558,11 +908,122 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
             <button className="primary" onClick={() => startSession('learn-and-review')}>Learn + Review</button>
             <button onClick={() => startSession('learn-only')}>Learn only</button>
             <button onClick={() => startSession('review-only')}>Review only ({dueCount} due)</button>
+            <button onClick={() => void startPrepMap()}>Map my prep</button>
           </div>
           <div className="muted small" style={{ marginTop: 12 }}>
-            <strong>Learn</strong>: a new line is auto-generated. The walkthrough plays opponent moves and shows arrows for yours; you play your own pieces. Then it's tested without arrows. <strong>Review</strong>: up to 10 oldest-due positions, one at a time.
+            <strong>Learn</strong>: a new line is auto-generated. The walkthrough plays opponent moves and shows arrows for yours; you play your own pieces. Then it's tested without arrows. <strong>Review</strong>: up to {trainingPreferences.reviewSessionLength} oldest-due positions, one at a time.
           </div>
+          <div className="prep-opening-picker">
+            <label className="small muted" htmlFor="prep-opening-select">Prep mapping starts from</label>
+            <select
+              id="prep-opening-select"
+              value={prepOpeningKey}
+              onChange={e => setPrepOpeningKey(e.target.value)}
+            >
+              <option value="">Current repertoire root</option>
+              {prepOpeningOptions.map(opening => (
+                <option key={opening.key} value={opening.key}>{opening.name}</option>
+              ))}
+            </select>
+          </div>
+          <FrontierQueuePanel
+            frontiers={frontierQueue}
+            rebuilding={rebuildingFrontiers}
+            copyStatus={frontierCopyStatus}
+            onRefresh={() => void refreshFrontierQueue()}
+            onCopy={() => void copyFrontierQueue()}
+          />
+          {genTrace.length > 0 && (
+            <GenerationTracePanel
+              trace={genTrace}
+              copyStatus={genTraceCopyStatus}
+              onCopy={() => void copyGenerationTrace()}
+            />
+          )}
         </div>
+      </div>
+    );
+  }
+
+  if (phase.kind === 'prep-map' || phase.kind === 'prep-confirm') {
+    const mapState = phase.kind === 'prep-confirm' ? phase.state : phase;
+    const isYourTurn = turnAt(mapState.cursorFen) === repertoire.color;
+    const sanLine = renderSanFromEdges(mapState.path);
+    return (
+      <div className="layout">
+        <div>
+          <Board
+            fen={mapState.cursorFen}
+            orientation={orientation}
+            onMove={attemptPrepMove}
+            allowMoves={phase.kind === 'prep-map' && isYourTurn && !mapState.loading}
+            allowedDragColor={repertoire.color}
+            size={boardSize}
+            animatePositionChange={animateComputerMove}
+            resizable
+            onSizeChange={onBoardSizeChange}
+          />
+        </div>
+        <div>
+          <div className="panel prep-map-panel">
+            <h3>Map my prep</h3>
+            <div className="muted small">
+              Chesski is walking the closest related popular opponent branches first. Play your prep on the board; press Not sure when you do not know or do not want a response.
+            </div>
+            <div className="prep-map-stats">
+              <div><strong>{mapState.stats.movesMapped}</strong><span>moves mapped</span></div>
+              <div><strong>{mapState.stats.frontiersCreated}</strong><span>frontiers</span></div>
+              <div><strong>{mapState.stats.branchesExplored}</strong><span>branches checked</span></div>
+              <div><strong>{mapState.stats.deepestPly}</strong><span>deepest ply</span></div>
+            </div>
+            {mapState.message && <div className="prep-map-message small">{mapState.message}</div>}
+            <div className="row" style={{ marginTop: 12 }}>
+              <button
+                className="primary"
+                onClick={() => void stopPrepHere(mapState)}
+                disabled={mapState.loading || phase.kind === 'prep-confirm'}
+              >
+                Not sure
+              </button>
+              <button onClick={() => setPhase({ kind: 'setup' })}>Stop mapping</button>
+            </div>
+          </div>
+          <div className="panel">
+            <h3>Current line</h3>
+            <div className="mono small">
+              {openingPreamble && <span className="muted">{openingPreamble} </span>}
+              {sanLine || (openingPreamble ? '' : '(start)')}
+            </div>
+            <div className="muted small" style={{ marginTop: 8 }}>
+              Queued related branches: {mapState.queue.length}
+            </div>
+          </div>
+          <FrontierQueuePanel
+            frontiers={frontierQueue}
+            rebuilding={rebuildingFrontiers}
+            copyStatus={frontierCopyStatus}
+            onRefresh={() => void refreshFrontierQueue()}
+            onCopy={() => void copyFrontierQueue()}
+          />
+        </div>
+        {phase.kind === 'prep-confirm' && (
+          <div className="modal-backdrop soft">
+            <div className="modal">
+              <h3>Keep this move?</h3>
+              <div className="small">
+                <strong className="mono">{phase.warning.san}</strong> has more losses than wins in the database:
+                {' '}<strong>{phase.warning.wins.toLocaleString()}</strong> wins,
+                {' '}<strong>{phase.warning.draws.toLocaleString()}</strong> draws,
+                {' '}<strong>{phase.warning.losses.toLocaleString()}</strong> losses.
+              </div>
+              <div className="row" style={{ marginTop: 14 }}>
+                <button className="primary" onClick={() => void commitPrepMove(phase.state, phase.move)}>Keep it</button>
+                <button onClick={() => void stopPrepHere(phase.state)}>Not sure</button>
+                <button onClick={() => setPhase(phase.state)}>Choose another move</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -577,9 +1038,14 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
           </div>
           <div className="muted small">
             {phase.kind === 'generating'
-              ? 'Chesski is generating your line. Review a quick chess fact while you wait.'
+              ? 'Chesski is generating your line. The trace below updates as each step finishes.'
               : 'Your line is ready when you are.'}
           </div>
+          <GenerationTracePanel
+            trace={genTrace}
+            copyStatus={genTraceCopyStatus}
+            onCopy={() => void copyGenerationTrace()}
+          />
           {loadingCard && (
             <LoadingHistoryCard
               cardState={loadingCard}
@@ -659,7 +1125,10 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
         <div>
           <div className="panel">
             <h3>Line so far</h3>
-            <div className="mono small">{sanLineUpToHere || '(start)'}</div>
+            <div className="mono small">
+              {openingPreamble && <span className="muted">{openingPreamble} </span>}
+              {sanLineUpToHere || (openingPreamble ? '' : '(start)')}
+            </div>
           </div>
           <LineEvalPanel line={phase.line.fullPath} currentFen={boardFen} color={repertoire.color} />
           <SourceGamePanel edge={sourceEdge} line={phase.line.fullPath} color={repertoire.color} />
@@ -786,7 +1255,10 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
           )}
           <div className="panel">
             <h3>Line so far</h3>
-            <div className="mono small">{sanLineUpToHere || '(start)'}</div>
+            <div className="mono small">
+              {openingPreamble && <span className="muted">{openingPreamble} </span>}
+              {sanLineUpToHere || (openingPreamble ? '' : '(start)')}
+            </div>
           </div>
           <LineEvalPanel line={phase.line.fullPath} currentFen={boardFen} color={repertoire.color} />
           <SourceGamePanel edge={sourceEdge} line={phase.line.fullPath} color={repertoire.color} />
@@ -869,12 +1341,29 @@ function emptyStats(): SessionStats {
   return { learnPassed: 0, learnFailed: 0, reviewPassed: 0, reviewFailed: 0, reviewSkipped: 0, switched: 0, linesLearned: 0 };
 }
 
-function buildReviewQueue(edges: Edge[], includeFallback: boolean): Edge[] {
+function emptyPrepStats(): PrepMapStats {
+  return { movesMapped: 0, frontiersCreated: 0, branchesExplored: 0, deepestPly: 0 };
+}
+
+function prepBranchKey(branch: Pick<PrepBranch, 'parentFen' | 'uci'>): string {
+  return `${branch.parentFen}::${branch.uci}`;
+}
+
+function choosePrepBranch(queue: PrepBranch[]): PrepBranch | null {
+  if (queue.length === 0) return null;
+  return [...queue].sort((a, b) => (
+    (b.depth - a.depth)
+    || (b.weight - a.weight)
+    || (b.games - a.games)
+  ))[0];
+}
+
+function buildReviewQueue(edges: Edge[], includeFallback: boolean, cap: number): Edge[] {
   const now = new Date();
   const due = edges
     .filter(e => isDue(e, now))
     .sort((a, b) => new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime());
-  if (due.length > 0 || !includeFallback) return due.slice(0, REVIEW_QUEUE_CAP);
+  if (due.length > 0 || !includeFallback) return due.slice(0, cap);
   return [...edges]
     .sort((a, b) => {
       const aReviewed = a.lastReviewedAt ? new Date(a.lastReviewedAt).getTime() : 0;
@@ -882,7 +1371,7 @@ function buildReviewQueue(edges: Edge[], includeFallback: boolean): Edge[] {
       if (aReviewed !== bReviewed) return aReviewed - bReviewed;
       return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
     })
-    .slice(0, REVIEW_QUEUE_CAP);
+    .slice(0, cap);
 }
 
 function SourceGamePanel({ edge, line, color }: { edge: Edge | null; line: Edge[]; color: Repertoire['color'] }) {
@@ -1013,6 +1502,88 @@ function chooseLoadingHistoryCard(progressByCard: ProgressByCard): HistoryCardSt
     })[0];
 }
 
+function FrontierQueuePanel({ frontiers, rebuilding, copyStatus, onRefresh, onCopy }: {
+  frontiers: FrontierCandidate[];
+  rebuilding: boolean;
+  copyStatus: string | null;
+  onRefresh: () => void;
+  onCopy: () => void;
+}) {
+  const open = frontiers.filter(frontier => frontier.status === 'open');
+  const blocked = frontiers.filter(frontier => frontier.status === 'blocked');
+  const answered = frontiers.filter(frontier => frontier.status === 'answered');
+  const rows = frontiers.slice(0, 10);
+  return (
+    <div className="frontier-queue">
+      <div className="frontier-queue-head">
+        <div>
+          <h3>Frontier queue</h3>
+          <div className="muted small">
+            {open.length} open, {blocked.length} blocked, {answered.length} answered. These are the candidate opponent continuations Chesski can train next.
+          </div>
+        </div>
+        <div className="frontier-queue-actions">
+          <button onClick={onRefresh} disabled={rebuilding}>{rebuilding ? 'Refreshing...' : 'Refresh list'}</button>
+          <button onClick={onCopy} disabled={frontiers.length === 0}>Copy list</button>
+        </div>
+      </div>
+      {copyStatus && <div className="muted small frontier-copy-status">{copyStatus}</div>}
+      {rows.length === 0 ? (
+        <div className="muted small frontier-empty">
+          No stored frontiers yet. Press Refresh list or start Learn to build the queue.
+        </div>
+      ) : (
+        <div className="frontier-table" role="table" aria-label="Frontier queue">
+          <div className="frontier-row frontier-row-head" role="row">
+            <span>Status</span>
+            <span>Move</span>
+            <span>Source</span>
+            <span>Weight</span>
+            <span>Games</span>
+            <span>Child FEN</span>
+          </div>
+          {rows.map(frontier => (
+            <div className="frontier-row" role="row" key={frontier.id} title={frontier.lastReason ?? frontier.childFen}>
+              <span className={`frontier-status frontier-status-${frontier.status}`}>{frontier.status}</span>
+              <span className="mono">{frontier.san} <span className="muted">({frontier.uci})</span></span>
+              <span>{frontier.source}</span>
+              <span>{frontier.weight.toFixed(5)}</span>
+              <span>{frontier.games.toLocaleString()}</span>
+              <span className="mono frontier-fen">{frontier.childFen}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GenerationTracePanel({ trace, copyStatus, onCopy }: {
+  trace: string[];
+  copyStatus: string | null;
+  onCopy: () => void;
+}) {
+  if (trace.length === 0) return null;
+  return (
+    <div className="generation-trace">
+      <div className="generation-trace-head">
+        <div>
+          <h3>Generation trace</h3>
+          <div className="muted small">{trace.length} events. Copy this whole box back into chat when debugging.</div>
+        </div>
+        <button onClick={onCopy}>Copy trace</button>
+      </div>
+      {copyStatus && <div className="muted small generation-trace-copy">{copyStatus}</div>}
+      <textarea
+        className="generation-trace-text mono"
+        readOnly
+        value={trace.join('\n')}
+        aria-label="Generation trace"
+      />
+    </div>
+  );
+}
+
 function LoadingHistoryCard({ cardState, answerShown, onToggleAnswer, onGrade }: {
   cardState: HistoryCardState;
   answerShown: boolean;
@@ -1022,7 +1593,7 @@ function LoadingHistoryCard({ cardState, answerShown, onToggleAnswer, onGrade }:
   const [before, after] = cardState.card.prompt.split('{{C1}}');
   return (
     <div className="cloze-card">
-      <div className="muted small">While Lichess thinks</div>
+      <div className="muted small">While Chesski builds the line</div>
       <div className="cloze-prompt">
         {before}
         <button className={'cloze-blank history-answer' + (answerShown ? ' revealed' : '')} onClick={onToggleAnswer} title="Click to pin answer">
@@ -1050,6 +1621,15 @@ function renderSanFromEdges(edges: Edge[]): string {
 
 function isTrainableEdge(edge: Edge, color: Repertoire['color']): boolean {
   return edge.mover === color && !edge.isScaffold;
+}
+
+function formatOpeningMoves(moves: string[]): string {
+  const parts: string[] = [];
+  for (let i = 0; i < moves.length; i++) {
+    if (i % 2 === 0) parts.push(`${Math.floor(i / 2) + 1}.`);
+    parts.push(moves[i]);
+  }
+  return parts.join(' ');
 }
 
 function lastMoveHighlights(edge: Edge): Record<string, string> {

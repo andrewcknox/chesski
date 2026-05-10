@@ -60,8 +60,44 @@ export interface Edge {
   createdAt: string;
 }
 
+export type FrontierStatus = 'open' | 'answered' | 'blocked' | 'stale';
+export type FrontierSource = 'explorer' | 'stockfish' | 'stored';
+
+export interface FrontierPathStep {
+  fromFen: NormFen;
+  toFen: NormFen;
+  san: string;
+  uci: string;
+  mover: Color;
+  popularityFraction: number;
+  edgeId?: string | null;
+}
+
+export interface FrontierCandidate {
+  id: string;
+  repertoireId: string;
+  parentFen: NormFen;
+  childFen: NormFen;
+  san: string;
+  uci: string;
+  mover: Color;
+  path: FrontierPathStep[];
+  weight: number;
+  games: number;
+  popularityFraction: number;
+  source: FrontierSource;
+  status: FrontierStatus;
+  lastReason?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export function edgeId(repertoireId: string, parentFen: NormFen, childFen: NormFen): string {
   return `${repertoireId}::${parentFen}::${childFen}`;
+}
+
+export function frontierId(repertoireId: string, parentFen: NormFen, uci: string): string {
+  return `${repertoireId}::${parentFen}::${uci}`;
 }
 
 export function newId(prefix = 'rep'): string {

@@ -6,6 +6,9 @@ const require = createRequire(import.meta.url)
 const { handleVaultApi } = require('./scripts/chesski-vault.cjs') as {
   handleVaultApi: (req: unknown, res: unknown, baseUrl: string) => Promise<boolean>;
 }
+const { handleStockfishApi } = require('./scripts/chesski-stockfish.cjs') as {
+  handleStockfishApi: (req: unknown, res: unknown) => Promise<boolean>;
+}
 
 function chesskiVaultApi(): Plugin {
   return {
@@ -15,6 +18,7 @@ function chesskiVaultApi(): Plugin {
         try {
           const host = req.headers.host ?? '127.0.0.1:5173'
           if (await handleVaultApi(req, res, `http://${host}`)) return
+          if (await handleStockfishApi(req, res)) return
           next()
         } catch (err) {
           res.statusCode = 500

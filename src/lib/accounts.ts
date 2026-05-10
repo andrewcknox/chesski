@@ -1,5 +1,5 @@
 import { getLichessToken, setLichessToken } from './lichess';
-import { ensureDefaultMainRepertoires, exportAll, getMeta, importAll, setMeta, type ExportData } from './storage';
+import { ensureDefaultMainRepertoires, exportAll, getMeta, importAll, listRepertoires, migrateToFenRoots, removeScaffoldContamination, setMeta, type ExportData } from './storage';
 import { getHistoryProgress, saveHistoryProgress, type ProgressByCard } from './historySrs';
 import { loadPersistentVault, savePersistentVault, type PersistentVault } from './localVault';
 import { markFirstRunOnboardingPending } from './onboarding';
@@ -247,6 +247,8 @@ export async function signIn(username: string, password: string): Promise<Accoun
     await importAll(updated.snapshot.data, 'replace');
     await setLichessToken(updated.snapshot.lichessToken ?? fallbackToken);
     await saveHistoryProgress(updated.snapshot.historyProgress);
+    await migrateToFenRoots();
+    await cleanAllRepertoireContamination();
   } else if (fallbackToken) {
     await setLichessToken(fallbackToken);
   }
@@ -255,6 +257,29 @@ export async function signIn(username: string, password: string): Promise<Accoun
 
 export async function signOut(): Promise<void> {
   await setCurrentAccountId(null);
+  // Clear the live DB so a subsequent account creation or sign-in starts from a
+  // clean slate instead of inheriting the previous user's data.
+  await clearLiveAccountData();
+}
+
+async function clearLiveAccountData(): Promise<void> {
+  await importAll({ version: 3, exportedAt: new Date().toISOString(), repertoires: [], nodes: [], edges: [], frontiers: [] }, 'replace');
+  await setLichessToken(null);
+  await saveHistoryProgress({});
+}
+
+// Remove contamination edges from all curated opening repertoires.
+// Safe to call repeatedly — fast no-op when there is nothing to clean.
+async function cleanAllRepertoireContamination(): Promise<void> {
+  const reps = await listRepertoires();
+  for (const rep of reps) {
+    if (rep.openingKey) await removeScaffoldContamination(rep.id);
+  }
+}
+
+export async function runStartupMigrations(): Promise<void> {
+  await migrateToFenRoots();
+  await cleanAllRepertoireContamination();
 }
 
 export async function syncCurrentAccount(): Promise<AccountSummary> {
@@ -284,7 +309,43 @@ export async function restoreCurrentAccount(): Promise<AccountSummary> {
   await importAll(account.snapshot.data, 'replace');
   await setLichessToken(account.snapshot.lichessToken);
   await saveHistoryProgress(account.snapshot.historyProgress);
+  await migrateToFenRoots();
   return accountSummary(account);
+}
+
+export async function deleteCurrentAccountData(): Promise<AccountSummary> {
+  const currentId = await getCurrentAccountId();
+  if (!currentId) throw new Error('Sign in before deleting account data.');
+  const vault = await getVault();
+  const accounts = vault.accounts as LocalAccount[];
+  const idx = accounts.findIndex(a => a.id === currentId);
+  if (idx === -1) throw new Error('The signed-in account was not found.');
+  await saveRecoverySnapshot('Before deleting account data');
+  const now = new Date().toISOString();
+  const updated = {
+    ...accounts[idx],
+    snapshot: null,
+    lastSyncedAt: null,
+    updatedAt: now,
+  };
+  accounts[idx] = updated;
+  await setVault({ ...vault, accounts, lichessToken: null });
+  await clearLiveAccountData();
+  return accountSummary(updated);
+}
+
+export async function deleteCurrentAccount(): Promise<void> {
+  const currentId = await getCurrentAccountId();
+  if (!currentId) throw new Error('Sign in before deleting this account.');
+  const vault = await getVault();
+  await saveRecoverySnapshot('Before deleting account');
+  await setVault({
+    ...vault,
+    accounts: (vault.accounts as LocalAccount[]).filter(account => account.id !== currentId),
+    currentAccountId: null,
+    lichessToken: null,
+  });
+  await clearLiveAccountData();
 }
 
 export async function restoreRecoverySnapshot(id: string): Promise<void> {
@@ -293,6 +354,7 @@ export async function restoreRecoverySnapshot(id: string): Promise<void> {
   await importAll(snapshot.data, 'replace');
   await setLichessToken(snapshot.lichessToken);
   await saveHistoryProgress(snapshot.historyProgress);
+  await migrateToFenRoots();
 }
 
 async function saveRecoverySnapshot(reason: string): Promise<void> {

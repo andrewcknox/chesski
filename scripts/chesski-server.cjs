@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { VAULT_PATH, sendJson, handleVaultApi } = require('./chesski-vault.cjs');
+const { handleStockfishApi } = require('./chesski-stockfish.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const DIST = path.join(ROOT, 'dist');
@@ -48,6 +49,7 @@ function serveStatic(req, res) {
 const server = http.createServer(async (req, res) => {
   try {
     if (await handleVaultApi(req, res, `http://${HOST}:${PORT}`)) return;
+    if (await handleStockfishApi(req, res)) return;
     serveStatic(req, res);
   } catch (err) {
     sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });

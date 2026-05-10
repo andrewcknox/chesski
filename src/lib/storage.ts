@@ -1,8 +1,8 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import { Chess } from 'chess.js';
-import type { Color, Edge, NormFen, PositionNode, Repertoire } from '../types';
+import type { Color, Edge, FrontierCandidate, FrontierStatus, NormFen, PositionNode, Repertoire } from '../types';
 import { edgeId, newId } from '../types';
-import { applyMove, normalizeFen, STARTING_FEN_NORM } from './chess';
+import { applyMove, computeOpeningFen, normalizeFen, STARTING_FEN_NORM } from './chess';
 import { freshSrsState } from './srs';
 import { CURATED_OPENINGS, findOpening, type ResolvedOpeningLine } from './openings';
 
@@ -29,11 +29,21 @@ interface ChessTrainerDB extends DBSchema {
     key: string;
     value: { key: string; value: unknown };
   };
+  frontiers: {
+    key: string;
+    value: FrontierCandidate;
+    indexes: {
+      'by-repertoire': string;
+      'by-rep-status': [string, FrontierStatus];
+      'by-rep-child': [string, string];
+    };
+  };
 }
 
 const DB_NAME = 'chess-trainer';
 // Version 2: per-repertoire edge model. Bumping wipes old (incompatible) data.
-const DB_VERSION = 2;
+// Version 3: local frontier queue. Existing v2 data is preserved.
+const DB_VERSION = 3;
 
 let _dbPromise: Promise<IDBPDatabase<ChessTrainerDB>> | null = null;
 
@@ -48,15 +58,28 @@ export function getDB(): Promise<IDBPDatabase<ChessTrainerDB>> {
           db.deleteObjectStore(name);
         }
       }
-      const reps = db.createObjectStore('repertoires', { keyPath: 'id' });
-      void reps;
-      db.createObjectStore('nodes', { keyPath: 'fen' });
-      const edges = db.createObjectStore('edges', { keyPath: 'id' });
-      edges.createIndex('by-repertoire', 'repertoireId');
-      edges.createIndex('by-rep-parent', ['repertoireId', 'parentFen']);
-      edges.createIndex('by-rep-child', ['repertoireId', 'childFen']);
-      edges.createIndex('by-rep-mover', ['repertoireId', 'mover']);
-      db.createObjectStore('meta', { keyPath: 'key' });
+      if (!db.objectStoreNames.contains('repertoires')) {
+        db.createObjectStore('repertoires', { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains('nodes')) {
+        db.createObjectStore('nodes', { keyPath: 'fen' });
+      }
+      if (!db.objectStoreNames.contains('edges')) {
+        const edges = db.createObjectStore('edges', { keyPath: 'id' });
+        edges.createIndex('by-repertoire', 'repertoireId');
+        edges.createIndex('by-rep-parent', ['repertoireId', 'parentFen']);
+        edges.createIndex('by-rep-child', ['repertoireId', 'childFen']);
+        edges.createIndex('by-rep-mover', ['repertoireId', 'mover']);
+      }
+      if (!db.objectStoreNames.contains('meta')) {
+        db.createObjectStore('meta', { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains('frontiers')) {
+        const frontiers = db.createObjectStore('frontiers', { keyPath: 'id' });
+        frontiers.createIndex('by-repertoire', 'repertoireId');
+        frontiers.createIndex('by-rep-status', ['repertoireId', 'status']);
+        frontiers.createIndex('by-rep-child', ['repertoireId', 'childFen']);
+      }
     },
   });
   return _dbPromise;
@@ -92,7 +115,7 @@ export async function updateRepertoire(id: string, patch: Partial<Pick<Repertoir
 
 export async function deleteRepertoire(id: string): Promise<void> {
   const db = await getDB();
-  const tx = db.transaction(['repertoires', 'edges'], 'readwrite');
+  const tx = db.transaction(['repertoires', 'edges', 'frontiers'], 'readwrite');
   await tx.objectStore('repertoires').delete(id);
   // Delete all edges scoped to this repertoire.
   const edgeStore = tx.objectStore('edges');
@@ -101,6 +124,13 @@ export async function deleteRepertoire(id: string): Promise<void> {
   while (cur) {
     await cur.delete();
     cur = await cur.continue();
+  }
+  const frontierStore = tx.objectStore('frontiers');
+  const frontierIdx = frontierStore.index('by-repertoire');
+  let frontierCur = await frontierIdx.openCursor(IDBKeyRange.only(id));
+  while (frontierCur) {
+    await frontierCur.delete();
+    frontierCur = await frontierCur.continue();
   }
   await tx.done;
   // Note: shared PositionNodes are not garbage-collected here — they're cheap and may be
@@ -162,8 +192,8 @@ export async function createRepertoireFromOpening(opening: ResolvedOpeningLine):
     name: opening.name,
     color: opening.color,
     openingKey: opening.key,
-    moves: opening.moves,
-    scaffoldPlyCount: opening.moves.length,
+    rootFen: computeOpeningFen(opening.moves),
+    // Root IS the opening position — no scaffold moves needed.
   });
 }
 
@@ -333,6 +363,96 @@ export async function putEdge(edge: Edge): Promise<void> {
   await db.put('edges', edge);
 }
 
+// ---------- Frontier Queue ----------
+
+function sortFrontiers(frontiers: FrontierCandidate[]): FrontierCandidate[] {
+  return [...frontiers].sort((a, b) => (
+    (b.weight - a.weight)
+    || (b.games - a.games)
+    || b.updatedAt.localeCompare(a.updatedAt)
+  ));
+}
+
+export async function getFrontiersForRepertoire(repertoireId: string): Promise<FrontierCandidate[]> {
+  const db = await getDB();
+  const frontiers = await db.getAllFromIndex('frontiers', 'by-repertoire', repertoireId);
+  return sortFrontiers(frontiers);
+}
+
+export async function getOpenFrontiers(repertoireId: string): Promise<FrontierCandidate[]> {
+  const db = await getDB();
+  const frontiers = await db.getAllFromIndex('frontiers', 'by-rep-status', [repertoireId, 'open']);
+  return sortFrontiers(frontiers);
+}
+
+export async function putFrontiers(frontiers: FrontierCandidate[]): Promise<void> {
+  if (frontiers.length === 0) return;
+  const db = await getDB();
+  const tx = db.transaction('frontiers', 'readwrite');
+  for (const frontier of frontiers) {
+    const existing = await tx.store.get(frontier.id);
+    await tx.store.put({
+      ...frontier,
+      createdAt: existing?.createdAt ?? frontier.createdAt,
+      status: existing?.status === 'blocked' ? existing.status : frontier.status,
+      lastReason: existing?.status === 'blocked' ? existing.lastReason : frontier.lastReason,
+    });
+  }
+  await tx.done;
+}
+
+export async function markFrontierAnswered(frontierId: string, reason = 'A user move was added for this frontier.'): Promise<void> {
+  const db = await getDB();
+  const frontier = await db.get('frontiers', frontierId);
+  if (!frontier || frontier.status === 'answered') return;
+  await db.put('frontiers', {
+    ...frontier,
+    status: 'answered',
+    lastReason: reason,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export async function markFrontiersAnsweredByChildFen(repertoireId: string, childFen: NormFen, reason = 'A user move was added for this frontier.'): Promise<number> {
+  const db = await getDB();
+  const matches = await db.getAllFromIndex('frontiers', 'by-rep-child', [repertoireId, childFen]);
+  if (matches.length === 0) return 0;
+  const tx = db.transaction('frontiers', 'readwrite');
+  const now = new Date().toISOString();
+  let updated = 0;
+  for (const frontier of matches) {
+    if (frontier.status === 'answered') continue;
+    await tx.store.put({ ...frontier, status: 'answered', lastReason: reason, updatedAt: now });
+    updated++;
+  }
+  await tx.done;
+  return updated;
+}
+
+export async function markFrontierBlocked(frontierId: string, reason: string): Promise<void> {
+  const db = await getDB();
+  const frontier = await db.get('frontiers', frontierId);
+  if (!frontier) return;
+  await db.put('frontiers', {
+    ...frontier,
+    status: 'blocked',
+    lastReason: reason,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export async function clearFrontiersForRepertoire(repertoireId: string): Promise<void> {
+  const db = await getDB();
+  const tx = db.transaction('frontiers', 'readwrite');
+  const idx = tx.store.index('by-repertoire');
+  let cur = await idx.openCursor(IDBKeyRange.only(repertoireId));
+  while (cur) {
+    await cur.delete();
+    cur = await cur.continue();
+  }
+  await tx.done;
+}
+
 export interface PlayMoveResult {
   edge: Edge;
   childCreated: boolean;
@@ -466,6 +586,127 @@ export async function resetAllSrsForRepertoire(repertoireId: string): Promise<nu
   return n;
 }
 
+// ---------- Contamination cleanup ----------
+
+// Removes non-scaffold opponent edges that were incorrectly added to curated opening
+// repertoires by old versions of the line generation algorithm. For example, 1...c5
+// (Sicilian) or 1...e6 (French) stored under an Italian Game repertoire.
+// Safe to call repeatedly — a no-op if no contamination exists.
+export async function removeScaffoldContamination(repertoireId: string): Promise<number> {
+  const db = await getDB();
+  const allEdges: Edge[] = await db.getAllFromIndex('edges', 'by-repertoire', repertoireId);
+  if (allEdges.length === 0) return 0;
+
+  const byParent = new Map<string, Edge[]>();
+  const byId = new Map<string, Edge>();
+  for (const e of allEdges) {
+    byId.set(e.id, e);
+    const arr = byParent.get(e.parentFen) ?? [];
+    arr.push(e);
+    byParent.set(e.parentFen, arr);
+  }
+
+  const rep = await db.get('repertoires', repertoireId);
+  if (!rep) return 0;
+
+  // Walk scaffold edges to find *intermediate* scaffold positions — those that have at
+  // least one outgoing scaffold edge (i.e. the scaffold path continues from here).
+  // The scaffold *endpoint* (the last scaffold position, e.g. after 3.Bc4 in Italian)
+  // is excluded because that is where legitimate non-scaffold branches begin.
+  const intermediateScaffoldPositions = new Set<string>();
+  const stack = [rep.rootFen];
+  const visited = new Set<string>();
+  while (stack.length) {
+    const fen = stack.pop()!;
+    if (visited.has(fen)) continue;
+    visited.add(fen);
+    const outgoing = byParent.get(fen) ?? [];
+    const scaffoldOut = outgoing.filter(e => e.isScaffold);
+    if (scaffoldOut.length > 0) {
+      // This position has outgoing scaffold moves, so it is intermediate.
+      intermediateScaffoldPositions.add(fen);
+      for (const e of scaffoldOut) stack.push(e.childFen);
+    }
+  }
+
+  // Contamination: non-scaffold opponent edges at intermediate scaffold positions.
+  // These are off-repertoire lines (Sicilian, Caro-Kann, Petrov, etc.) that were
+  // incorrectly generated alongside the intended scaffold path.
+  const toDelete = new Set<string>();
+  for (const fen of intermediateScaffoldPositions) {
+    for (const e of (byParent.get(fen) ?? [])) {
+      if (e.mover !== rep.color && !e.isScaffold) toDelete.add(e.id);
+    }
+  }
+  if (toDelete.size === 0) return 0;
+
+  // BFS to collect all descendants of contaminated edges.
+  const bfsQueue = [...toDelete];
+  while (bfsQueue.length) {
+    const id = bfsQueue.shift()!;
+    const edge = byId.get(id);
+    if (!edge) continue;
+    for (const child of (byParent.get(edge.childFen) ?? [])) {
+      if (!toDelete.has(child.id)) {
+        toDelete.add(child.id);
+        bfsQueue.push(child.id);
+      }
+    }
+  }
+
+  const tx = db.transaction('edges', 'readwrite');
+  for (const id of toDelete) tx.store.delete(id);
+  await tx.done;
+  return toDelete.size;
+}
+
+// One-time migration: for every curated-opening repertoire whose rootFen is still the
+// starting position, advance rootFen to the position after the opening moves and delete
+// the scaffold path + any contamination that lived before that position.
+export async function migrateToFenRoots(): Promise<void> {
+  const reps = await listRepertoires();
+  for (const rep of reps) {
+    if (!rep.openingKey) continue;
+    if (rep.rootFen !== STARTING_FEN_NORM) continue; // already migrated
+    const opening = findOpening(rep.openingKey);
+    if (!opening || opening.moves.length === 0) continue;
+
+    const newRootFen = computeOpeningFen(opening.moves);
+    if (newRootFen === STARTING_FEN_NORM) continue;
+
+    const db = await getDB();
+    const allEdges: Edge[] = await db.getAllFromIndex('edges', 'by-repertoire', rep.id);
+
+    const byParent = new Map<string, Edge[]>();
+    for (const e of allEdges) {
+      const arr = byParent.get(e.parentFen) ?? [];
+      arr.push(e);
+      byParent.set(e.parentFen, arr);
+    }
+
+    // BFS from newRootFen to find all reachable edge IDs.
+    const reachable = new Set<string>();
+    const queue = [newRootFen];
+    const visitedFens = new Set<string>();
+    while (queue.length) {
+      const fen = queue.shift()!;
+      if (visitedFens.has(fen)) continue;
+      visitedFens.add(fen);
+      for (const e of (byParent.get(fen) ?? [])) {
+        reachable.add(e.id);
+        queue.push(e.childFen);
+      }
+    }
+
+    // Delete scaffold path + contamination; advance rootFen.
+    const toDelete = allEdges.filter(e => !reachable.has(e.id)).map(e => e.id);
+    const tx = db.transaction(['repertoires', 'edges'], 'readwrite');
+    for (const id of toDelete) tx.objectStore('edges').delete(id);
+    tx.objectStore('repertoires').put({ ...rep, rootFen: newRootFen, updatedAt: new Date().toISOString() });
+    await tx.done;
+  }
+}
+
 // ---------- Meta ----------
 
 export async function setMeta<T = unknown>(key: string, value: T): Promise<void> {
@@ -482,39 +723,46 @@ export async function getMeta<T = unknown>(key: string): Promise<T | undefined> 
 // ---------- Export / Import ----------
 
 export interface ExportData {
-  version: 2;
+  version: 2 | 3;
   exportedAt: string;
   repertoires: Repertoire[];
   nodes: PositionNode[];
   edges: Edge[];
+  frontiers?: FrontierCandidate[];
 }
 
 export async function exportAll(): Promise<ExportData> {
-  const [repertoires, nodes, edges] = await Promise.all([listRepertoires(), getAllNodes(), (async () => {
+  const [repertoires, nodes, edges, frontiers] = await Promise.all([listRepertoires(), getAllNodes(), (async () => {
     const db = await getDB();
     return db.getAll('edges');
+  })(), (async () => {
+    const db = await getDB();
+    return db.getAll('frontiers');
   })()]);
   return {
-    version: 2,
+    version: 3,
     exportedAt: new Date().toISOString(),
     repertoires,
     nodes,
     edges,
+    frontiers,
   };
 }
 
 export async function importAll(data: ExportData, mode: 'replace' | 'merge' = 'replace'): Promise<void> {
-  if (data.version !== 2) throw new Error(`Unsupported export version: ${data.version}`);
+  if (data.version !== 2 && data.version !== 3) throw new Error(`Unsupported export version: ${data.version}`);
   const db = await getDB();
-  const tx = db.transaction(['repertoires', 'nodes', 'edges'], 'readwrite');
+  const tx = db.transaction(['repertoires', 'nodes', 'edges', 'frontiers'], 'readwrite');
   if (mode === 'replace') {
     await tx.objectStore('repertoires').clear();
     await tx.objectStore('nodes').clear();
     await tx.objectStore('edges').clear();
+    await tx.objectStore('frontiers').clear();
   }
   for (const r of data.repertoires) await tx.objectStore('repertoires').put(r);
   for (const n of data.nodes) await tx.objectStore('nodes').put(n);
   for (const e of data.edges) await tx.objectStore('edges').put(e);
+  for (const f of data.frontiers ?? []) await tx.objectStore('frontiers').put(f);
   await tx.done;
 }
 

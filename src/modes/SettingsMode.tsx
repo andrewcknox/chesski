@@ -16,6 +16,17 @@ import {
   type RecommendationSourceKey,
   type RecommendationSettings,
 } from '../lib/recommendationSettings';
+import {
+  BOARD_THEME_OPTIONS,
+  PIECE_SET_OPTIONS,
+  type BoardThemeKey,
+  type PieceSetKey,
+  useBoardPreferences,
+} from '../lib/boardPreferences';
+import { useTrainingPreferences } from '../lib/trainingPreferences';
+
+const MIN_ANIMATION_MS = 40;
+const MAX_ANIMATION_MS = 260;
 
 const ALGORITHM_GUIDE_STEPS = [
   {
@@ -33,6 +44,8 @@ const ALGORITHM_GUIDE_STEPS = [
 ];
 
 export function SettingsMode() {
+  const { preferences: boardPreferences, updatePreferences } = useBoardPreferences();
+  const { preferences: trainingPreferences, updatePreferences: updateTrainingPreferences } = useTrainingPreferences();
   const [settings, setSettingsState] = useState<RecommendationSettings>(DEFAULT_RECOMMENDATION_SETTINGS);
   const [loaded, setLoaded] = useState(false);
   const [bookStats, setBookStats] = useState<PlayerBookStats[]>([]);
@@ -173,6 +186,7 @@ export function SettingsMode() {
   const activeKeys = activeSourceKeys();
   const activeSources = activeKeys.map(key => RECOMMENDATION_CHOICES.find(source => source.key === key)).filter(Boolean) as RecommendationSourceChoice[];
   const inactiveSources = RECOMMENDATION_CHOICES.filter(source => !activeKeys.includes(source.key));
+  const animationSpeedSliderValue = MAX_ANIMATION_MS + MIN_ANIMATION_MS - boardPreferences.animationSpeedMs;
 
   return (
     <div className="layout settings-layout">
@@ -194,6 +208,111 @@ export function SettingsMode() {
           </div>
         </div>
         <button onClick={() => { setGuideStep(0); setGuideOpen(true); }}>Guide me</button>
+      </div>
+
+      <div className="panel board-preferences-panel">
+        <h3>Board and pieces</h3>
+        <div className="settings-copy muted small">
+          Tune the board without changing your repertoire or training data.
+        </div>
+        <div className="board-preference-group">
+          <strong>Board color</strong>
+          <div className="board-theme-grid">
+            {BOARD_THEME_OPTIONS.map(theme => (
+              <button
+                key={theme.key}
+                className={'board-theme-choice' + (boardPreferences.boardTheme === theme.key ? ' active' : '')}
+                onClick={() => void updatePreferences({ boardTheme: theme.key as BoardThemeKey })}
+              >
+                <span className="board-theme-swatch" style={{ background: `linear-gradient(135deg, ${theme.light} 0 50%, ${theme.dark} 50% 100%)` }} />
+                <span>{theme.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="board-preference-group">
+          <strong>Pieces</strong>
+          <div className="segmented">
+            {PIECE_SET_OPTIONS.map(pieceSet => (
+              <button
+                key={pieceSet.key}
+                className={boardPreferences.pieceSet === pieceSet.key ? 'active' : ''}
+                onClick={() => void updatePreferences({ pieceSet: pieceSet.key as PieceSetKey })}
+              >
+                {pieceSet.name}
+              </button>
+            ))}
+          </div>
+        </div>
+        <label className="board-preference-check">
+          <input
+            type="checkbox"
+            checked={boardPreferences.animationsEnabled}
+            onChange={e => void updatePreferences({ animationsEnabled: e.target.checked })}
+          />
+          <span>Animate piece movement</span>
+        </label>
+        <div className="board-preference-speed">
+          <label htmlFor="animation-speed">Animation speed</label>
+          <input
+            id="animation-speed"
+            type="range"
+            min={MIN_ANIMATION_MS}
+            max={MAX_ANIMATION_MS}
+            step={10}
+            value={animationSpeedSliderValue}
+            disabled={!boardPreferences.animationsEnabled}
+            onChange={e => void updatePreferences({ animationSpeedMs: MAX_ANIMATION_MS + MIN_ANIMATION_MS - Number(e.target.value) })}
+          />
+          <span className="mono small">{boardPreferences.animationSpeedMs}ms</span>
+        </div>
+        <label className="board-preference-check">
+          <input
+            type="checkbox"
+            checked={boardPreferences.soundEnabled}
+            onChange={e => void updatePreferences({ soundEnabled: e.target.checked })}
+          />
+          <span>Move sound</span>
+        </label>
+      </div>
+
+      <div className="panel training-preferences-panel">
+        <h3>Training sessions</h3>
+        <div className="settings-copy muted small">
+          Set how much new prep Chesski introduces and how many review cards a session serves up.
+        </div>
+        <div className="training-preference-row">
+          <label htmlFor="learn-line-depth">
+            <strong>New line depth</strong>
+            <span className="muted small">Your moves per Learn line</span>
+          </label>
+          <input
+            id="learn-line-depth"
+            type="range"
+            min={3}
+            max={8}
+            step={1}
+            value={trainingPreferences.learnLineDepth}
+            onChange={e => void updateTrainingPreferences({ learnLineDepth: Number(e.target.value) })}
+          />
+          <span className="mono small">{trainingPreferences.learnLineDepth}</span>
+        </div>
+        <div className="training-preference-row">
+          <label htmlFor="review-session-length">
+            <strong>Review length</strong>
+            <span className="muted small">Cards per Review session</span>
+          </label>
+          <input
+            id="review-session-length"
+            type="range"
+            min={5}
+            max={30}
+            step={1}
+            value={trainingPreferences.reviewSessionLength}
+            onChange={e => void updateTrainingPreferences({ reviewSessionLength: Number(e.target.value) })}
+          />
+          <span className="mono small">{trainingPreferences.reviewSessionLength}</span>
+        </div>
       </div>
 
       <div className="panel">

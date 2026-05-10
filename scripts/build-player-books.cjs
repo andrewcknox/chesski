@@ -105,6 +105,23 @@ function compareCandidates(a, b) {
   return b.draws - a.draws;
 }
 
+function sourceLineFromMoves(label, moves, startIndex) {
+  return {
+    label,
+    moves: moves.slice(startIndex, startIndex + 10).map(move => ({
+      san: move.san,
+      uci: move.lan,
+      color: move.color,
+    })),
+  };
+}
+
+function bucketRank(bucket) {
+  if (bucket === 'wins') return 3;
+  if (bucket === 'draws') return 2;
+  return 1;
+}
+
 function makeBook(player) {
   const pgn = fs.readFileSync(path.join(ROOT, player.pgn), 'utf8');
   const allGames = splitGames(pgn);
@@ -133,7 +150,7 @@ function makeBook(player) {
     indexedGames++;
 
     const moves = chess.history({ verbose: true }).slice(0, MAX_OPENING_PLIES);
-    for (const move of moves) {
+    for (const [idx, move] of moves.entries()) {
       if (move.color !== color) continue;
       const fen = normalizeFen(move.before);
       const key = `${color}::${fen}`;
@@ -150,6 +167,10 @@ function makeBook(player) {
       stats[bucket]++;
       const exampleKey = bucket === 'wins' ? 'winExamples' : bucket === 'draws' ? 'drawExamples' : 'lossExamples';
       if (stats[exampleKey].length < 3 && !stats[exampleKey].includes(label)) stats[exampleKey].push(label);
+      if (!stats.sourceLine || bucketRank(bucket) > (stats.sourceLineRank ?? 0)) {
+        stats.sourceLine = sourceLineFromMoves(label, moves, idx);
+        stats.sourceLineRank = bucketRank(bucket);
+      }
     }
   }
 
@@ -158,7 +179,7 @@ function makeBook(player) {
     const moves = Array.from(byMove.values())
       .filter(isCandidateTakeable)
       .sort(compareCandidates)
-      .map(m => ({ ...m, scoreRate: resultScoreRate(m) }));
+      .map(({ sourceLineRank, ...m }) => ({ ...m, scoreRate: resultScoreRate(m) }));
     if (moves.length > 0) compactPositions.push([key, moves]);
   }
 

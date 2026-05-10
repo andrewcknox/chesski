@@ -27,6 +27,13 @@ export function turnAt(normFen: NormFen): 'w' | 'b' {
   return chessFromFen(normFen).turn();
 }
 
+// Play a sequence of SAN moves from the starting position and return the normalized FEN.
+export function computeOpeningFen(moves: string[]): NormFen {
+  const chess = new Chess();
+  for (const move of moves) chess.move(move);
+  return normalizeFen(chess.fen());
+}
+
 // Apply a move (SAN or {from,to,promotion}) to a normalized FEN.
 // Returns null if illegal.
 export function applyMove(

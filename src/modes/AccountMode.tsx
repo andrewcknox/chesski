@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import {
   createAccount,
+  deleteCurrentAccount,
+  deleteCurrentAccountData,
   getCurrentAccount,
   listAccountSummaries,
   listRecoverySummaries,
@@ -94,6 +96,25 @@ export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
     await run(signOut, 'Signed out.');
   }
 
+  async function handleDeleteAccountData() {
+    if (!window.confirm('Delete this account\'s saved study data and clear the current local repertoire/trivia/token data? Chesski will create a rescue snapshot first. The account login will remain.')) return;
+    if (!window.confirm('Last check: delete the study data for this account now?')) return;
+    await run(async () => {
+      await deleteCurrentAccountData();
+      onRestored();
+    }, 'Account study data deleted. A rescue snapshot was kept.');
+  }
+
+  async function handleDeleteAccount() {
+    if (!current) return;
+    if (!window.confirm(`Delete account "${current.username}" from this computer? Chesski will create a rescue snapshot first, then sign out and clear current local study data.`)) return;
+    if (!window.confirm('Last check: permanently remove this account login from the local vault?')) return;
+    await run(async () => {
+      await deleteCurrentAccount();
+      onRestored();
+    }, 'Account deleted.');
+  }
+
   async function handleRecoveryRestore(id: string) {
     if (!window.confirm('Restore this rescue snapshot? This replaces the current local repertoire and trivia-card progress.')) return;
     await run(async () => {
@@ -154,6 +175,16 @@ export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
               <button onClick={handleRestore} disabled={busy || !current.hasSnapshot}>Restore from account</button>
               <button onClick={() => setShowTokenManage(true)} disabled={busy}>Manage Lichess token</button>
               <button onClick={handleSignOut} disabled={busy}>Sign out</button>
+            </div>
+            <div className="account-danger-zone">
+              <div>
+                <strong>Delete local account data</strong>
+                <div className="muted small">These actions create a rescue snapshot first, then clear data from this computer.</div>
+              </div>
+              <div className="row account-actions">
+                <button className="danger" onClick={handleDeleteAccountData} disabled={busy}>Delete account data</button>
+                <button className="danger" onClick={handleDeleteAccount} disabled={busy}>Delete account</button>
+              </div>
             </div>
           </>
         ) : (
