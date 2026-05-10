@@ -6,9 +6,8 @@ const ROOT = path.resolve(__dirname, '..');
 const STOCKFISH_EXE = path.join(
   ROOT,
   'stockfish',
-  'stockfish-windows-x86-64-avx2',
-  'stockfish',
-  'stockfish-windows-x86-64-avx2.exe'
+  'stockfish-12-windows-x86-64-avx2',
+  'stockfish-12-windows-x86-64-avx2.exe'
 );
 
 let queue = Promise.resolve();
