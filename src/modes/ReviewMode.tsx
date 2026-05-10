@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { ClozePrompt } from '../components/ClozePrompt';
 import type { Color, Edge, Repertoire } from '../types';
 import { reviewGamePgn, type GameReviewResult, type ReviewMoment } from '../lib/gameReview';
 import { playMoveInRepertoire, putEdge } from '../lib/storage';
@@ -153,17 +154,10 @@ function ReviewHistoryCard({ cardState, answerShown, onToggleAnswer, onGrade }: 
   onToggleAnswer: () => void;
   onGrade: (knewIt: boolean) => void;
 }) {
-  const [before, after] = cardState.card.prompt.split('{{C1}}');
   return (
     <div className="cloze-card">
       <div className="muted small">While Chesski analyzes your game</div>
-      <div className="cloze-prompt">
-        {before}
-        <button className={'cloze-blank history-answer' + (answerShown ? ' revealed' : '')} onClick={onToggleAnswer} title="Click to pin answer">
-          {cardState.card.answer}
-        </button>
-        {after}
-      </div>
+      <ClozePrompt card={cardState.card} answerShown={answerShown} onToggleAnswer={onToggleAnswer} />
       <div className="row history-actions">
         <button className="primary" onClick={() => onGrade(true)}>Knew it</button>
         <button onClick={() => onGrade(false)}>Couldn't pull it</button>

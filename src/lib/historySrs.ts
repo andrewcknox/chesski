@@ -24,7 +24,9 @@ export interface HistoryCardState {
 }
 
 export function historyCardId(card: HistoryClozeCard): string {
-  return `${card.prompt}::${card.answer}`;
+  if (!card.kind || card.kind === 'history') return `${card.prompt}::${card.answer ?? ''}`;
+  const answers = (card.clozes ?? [{ answer: card.answer ?? '' }]).map(cloze => cloze.answer).join('::');
+  return `${card.kind}::${card.prompt}::${answers}`;
 }
 
 export function freshHistoryProgress(now = new Date()): HistoryProgress {

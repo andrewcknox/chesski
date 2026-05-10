@@ -1,9 +1,20 @@
+import chessQuotesCsv from '../../chess_quotes.csv?raw';
+
 export interface HistoryClozeCard {
   prompt: string;
+  clozes?: HistoryCloze[];
+  answer?: string;
+  kind?: 'history' | 'quote';
+  tags?: string[];
+}
+
+export interface HistoryCloze {
+  marker: string;
+  label: string;
   answer: string;
 }
 
-export const CHESS_HISTORY_CLOZE: HistoryClozeCard[] = [
+const HISTORY_CARDS: HistoryClozeCard[] = [
   {
     prompt: 'In 1851, the London tournament was won by {{C1}} and helped establish international tournament chess.',
     answer: 'Adolf Anderssen',
@@ -961,3 +972,88 @@ export const CHESS_HISTORY_CLOZE: HistoryClozeCard[] = [
     answer: 'Tartakower',
   },
 ];
+
+export const CHESS_HISTORY_CLOZE: HistoryClozeCard[] = [
+  ...HISTORY_CARDS,
+  ...buildQuoteCards(chessQuotesCsv),
+];
+
+function buildQuoteCards(csv: string): HistoryClozeCard[] {
+  return parseQuoteCsv(csv).map(row => {
+    const importantWord = chooseImportantWord(row.quote);
+    return {
+      prompt: `"${replaceFirstWord(row.quote, importantWord, '{{C2}}')}" - {{C1}}`,
+      clozes: [
+        { marker: '{{C1}}', label: 'speaker', answer: row.attribution },
+        { marker: '{{C2}}', label: 'word', answer: importantWord },
+      ],
+      kind: 'quote',
+      tags: ['quote', `quote-tier-${row.tier.toLowerCase()}`],
+    };
+  });
+}
+
+function parseQuoteCsv(csv: string): Array<{ tier: string; quote: string; attribution: string }> {
+  const rows = parseCsv(csv.trim());
+  const [header, ...body] = rows;
+  const tierIndex = header?.indexOf('tier') ?? -1;
+  const quoteIndex = header?.indexOf('quote') ?? -1;
+  const attributionIndex = header?.indexOf('attribution') ?? -1;
+  if (tierIndex < 0 || quoteIndex < 0 || attributionIndex < 0) return [];
+  return body
+    .map(row => ({
+      tier: row[tierIndex]?.trim() || 'A',
+      quote: row[quoteIndex]?.trim() || '',
+      attribution: row[attributionIndex]?.trim() || '',
+    }))
+    .filter(row => row.quote && row.attribution);
+}
+
+function parseCsv(csv: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < csv.length; i++) {
+    const char = csv[i];
+    const next = csv[i + 1];
+    if (char === '"' && inQuotes && next === '"') {
+      field += '"';
+      i++;
+    } else if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      row.push(field);
+      field = '';
+    } else if ((char === '\n' || char === '\r') && !inQuotes) {
+      if (char === '\r' && next === '\n') i++;
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+    } else {
+      field += char;
+    }
+  }
+  row.push(field);
+  rows.push(row);
+  return rows.filter(fields => fields.some(value => value.trim()));
+}
+
+function chooseImportantWord(quote: string): string {
+  const stopwords = new Set([
+    'about', 'after', 'again', 'against', 'always', 'because', 'before', 'being',
+    'better', 'between', 'board', 'chess', 'could', 'every', 'great', 'little',
+    'never', 'other', 'player', 'should', 'their', 'there', 'these', 'thing',
+    'those', 'through', 'under', 'where', 'which', 'while', 'without', 'would',
+    'your', 'youre',
+  ]);
+  const words = quote.match(/[A-Za-z][A-Za-z'-]{3,}/g) ?? [];
+  const candidates = words.filter(word => !stopwords.has(word.toLowerCase().replace(/[^a-z]/g, '')));
+  return [...(candidates.length ? candidates : words)].sort((a, b) => b.length - a.length)[0] ?? 'chess';
+}
+
+function replaceFirstWord(text: string, word: string, replacement: string): string {
+  const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text.replace(new RegExp(`\\b${escaped}\\b`), replacement);
+}

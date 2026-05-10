@@ -17,8 +17,10 @@ import {
   type RecommendationSettings,
 } from '../lib/recommendationSettings';
 import {
+  APP_THEME_OPTIONS,
   BOARD_THEME_OPTIONS,
   PIECE_SET_OPTIONS,
+  type AppThemeKey,
   type BoardThemeKey,
   type PieceSetKey,
   useBoardPreferences,
@@ -216,6 +218,20 @@ export function SettingsMode() {
           Tune the board without changing your repertoire or training data.
         </div>
         <div className="board-preference-group">
+          <strong>Appearance</strong>
+          <div className="segmented">
+            {APP_THEME_OPTIONS.map(theme => (
+              <button
+                key={theme.key}
+                className={boardPreferences.appTheme === theme.key ? 'active' : ''}
+                onClick={() => void updatePreferences({ appTheme: theme.key as AppThemeKey })}
+              >
+                {theme.name}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="board-preference-group">
           <strong>Board color</strong>
           <div className="board-theme-grid">
             {BOARD_THEME_OPTIONS.map(theme => (
@@ -273,6 +289,14 @@ export function SettingsMode() {
             onChange={e => void updatePreferences({ soundEnabled: e.target.checked })}
           />
           <span>Move sound</span>
+        </label>
+        <label className="board-preference-check">
+          <input
+            type="checkbox"
+            checked={boardPreferences.hideDragGhost}
+            onChange={e => void updatePreferences({ hideDragGhost: e.target.checked })}
+          />
+          <span>Use origin-square highlight while dragging</span>
         </label>
       </div>
 

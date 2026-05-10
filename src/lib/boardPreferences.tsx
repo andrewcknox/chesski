@@ -2,23 +2,28 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { getMeta, setMeta } from './storage';
 
+export type AppThemeKey = 'dark' | 'light';
 export type BoardThemeKey = 'classic' | 'blue' | 'green' | 'gray';
 export type PieceSetKey = 'staunton' | 'fantasy' | 'spatial' | 'chessnut';
 
 export interface BoardPreferences {
+  appTheme: AppThemeKey;
   boardTheme: BoardThemeKey;
   pieceSet: PieceSetKey;
   animationsEnabled: boolean;
   animationSpeedMs: number;
   soundEnabled: boolean;
+  hideDragGhost: boolean;
 }
 
 export const DEFAULT_BOARD_PREFERENCES: BoardPreferences = {
+  appTheme: 'dark',
   boardTheme: 'classic',
   pieceSet: 'staunton',
   animationsEnabled: true,
   animationSpeedMs: 110,
   soundEnabled: false,
+  hideDragGhost: false,
 };
 
 export const BOARD_THEME_OPTIONS: Array<{ key: BoardThemeKey; name: string; light: string; dark: string }> = [
@@ -33,6 +38,11 @@ export const PIECE_SET_OPTIONS: Array<{ key: PieceSetKey; name: string }> = [
   { key: 'fantasy', name: 'Fantasy' },
   { key: 'spatial', name: 'Spatial' },
   { key: 'chessnut', name: 'Chessnut' },
+];
+
+export const APP_THEME_OPTIONS: Array<{ key: AppThemeKey; name: string }> = [
+  { key: 'dark', name: 'Dark' },
+  { key: 'light', name: 'Light' },
 ];
 
 const META_BOARD_PREFERENCES = 'board_preferences_v1';
@@ -68,6 +78,10 @@ export function BoardPreferencesProvider({ children }: { children: React.ReactNo
     },
   }), [preferences]);
 
+  useEffect(() => {
+    document.documentElement.dataset.theme = preferences.appTheme;
+  }, [preferences.appTheme]);
+
   return (
     <BoardPreferencesContext.Provider value={value}>
       {children}
@@ -80,6 +94,9 @@ export function useBoardPreferences() {
 }
 
 function normalizeBoardPreferences(saved?: Partial<BoardPreferences>): BoardPreferences {
+  const appTheme = saved?.appTheme === 'light' || saved?.appTheme === 'dark'
+    ? saved.appTheme
+    : DEFAULT_BOARD_PREFERENCES.appTheme;
   const savedBoardTheme = saved?.boardTheme;
   const savedPieceSet = migratePieceSet(saved?.pieceSet);
   const boardTheme = BOARD_THEME_OPTIONS.find(option => option.key === savedBoardTheme)?.key
@@ -91,6 +108,7 @@ function normalizeBoardPreferences(saved?: Partial<BoardPreferences>): BoardPref
     : DEFAULT_BOARD_PREFERENCES.animationSpeedMs;
 
   return {
+    appTheme,
     boardTheme,
     pieceSet,
     animationsEnabled: typeof saved?.animationsEnabled === 'boolean'
@@ -100,6 +118,9 @@ function normalizeBoardPreferences(saved?: Partial<BoardPreferences>): BoardPref
     soundEnabled: typeof saved?.soundEnabled === 'boolean'
       ? saved.soundEnabled
       : DEFAULT_BOARD_PREFERENCES.soundEnabled,
+    hideDragGhost: typeof saved?.hideDragGhost === 'boolean'
+      ? saved.hideDragGhost
+      : DEFAULT_BOARD_PREFERENCES.hideDragGhost,
   };
 }
 

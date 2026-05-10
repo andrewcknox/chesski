@@ -28,13 +28,10 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 
 ## Training And Review
 
-- Randomize the order in which new SRS cards are introduced.
 - Treat moves between the starting position and a core opening as scaffold only, not SRS cards.
-- Add a Chessable-style timer bar for learning/training. Default to 30 seconds. When the timer reaches zero, count the move wrong for SRS, show the correct-move arrow, and prompt the user to play it. Include a pause-timer option.
 - When the user gets the last move wrong in a learning line, show clear wrong-answer feedback and show the correct move.
-- Make "Learn + Review" always include review work. If no cards are due, pull some not-due cards as fallback review.
-- During learning or reviewing sessions, hide the other top-level navigation headings because clicking away mid-session usually does not make sense.
 - Add a flow-state mode where the top tabs are blocked or hidden and Chesski cycles through Learn and Review sessions until the user explicitly ends the flow.
+- Keep the prompted-move timer concept parked for later: optional adjustable timer with pause/resume, timeout grading, and correct-move reveal. It was removed from the active training UI because it made the board area too jumpy and tall.
 - Add a transition that sweeps across the board when Chesski switches from learning to reviewing.
 - Investigate why a generated learning line sometimes has only 3 new moves instead of the expected 5.
 - Improve the repeated-wrong-move switch prompt: let the user click "Use X instead" or "Stick with Y" immediately while the engine comparison loads, rather than blocking the session on "Checking with the engine."
@@ -55,7 +52,6 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 - Add chess piece animation speed customizability, separately configurable for teaching and quiz/training.
 - Toggle highlighting legal moves.
 - Toggle piece sound.
-- Add light mode and dark mode.
 
 ## Opening Discovery And Recommendations
 
@@ -64,7 +60,6 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 
 ## Motivation And Delight
 
-- Add chess quote cards like agadmator video quotes. Each quote card should have two clozes: who said it and a critical word in the quote.
 - Generally beautify the website so it is pleasant to look at and feels good to use.
 - Add little icons for the players' heads in player/source lists.
 - Redesign the desktop/app icon from a stronger source asset. The current skier/knight mark does not read clearly enough as either a knight or a ski pole at desktop size.
@@ -101,3 +96,11 @@ This file is a lightweight parking lot for ideas Andy wants to preserve for late
 - Made trivia cards appear in a random session order instead of always walking the same sequence.
 - Expanded the chess-history trivia deck from 10 to 40 cloze cards.
 - Kept trivia available on the line-loading screen by falling back to least-recently-reviewed cards when nothing is due.
+- Added tagged chess quote trivia cards with speaker and quote-word clozes from `chess_quotes.csv`.
+- Randomized top-candidate introduction for brand-new SRS learning cards without changing due-card review order.
+- Made Learn + Review include fallback not-due review cards when the session starts with no due review work.
+- Made My Lines "Other Positions" collapsible, reduced board preview sizes, and strengthened open-folder styling.
+- Hid other top-level navigation while a training session is active.
+- Added app-wide light/dark mode in Settings.
+- Added a board setting to replace the drag-origin ghost piece with origin-square highlighting.
+- Moved arrow-key history scrubbing into the shared board wrapper and wired it through My Lines selected positions.

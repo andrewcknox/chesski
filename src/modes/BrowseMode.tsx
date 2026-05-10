@@ -82,21 +82,29 @@ function makeLineItem(rootFen: NormFen, leafFen: NormFen, path: Edge[]): LineIte
   }
 
   const extensionEdges = path.slice(categoryIdx + 1);
-  const extensionSan = renderSanFromEdges(extensionEdges);
+  const extensionSan = renderSanFromEdges(extensionEdges, categoryIdx + 1);
   const fullSan = renderSanFromEdges(path);
   return { leafFen, path, categoryFen, categoryName, categoryEco, extensionSan, fullSan };
 }
 
-function renderSanFromEdges(edges: Edge[]): string {
+function renderSanFromEdges(edges: Edge[], startingPly = 0): string {
   const out: string[] = [];
-  let moveNum = 1;
+  let moveNum = Math.floor(startingPly / 2) + 1;
+  let ply = startingPly;
   // We need to know the starting move number: derive from the first edge's mover.
   // If first edge mover === 'b', that's "1...e5" style; we treat that as starting at move 1 black.
   // For simplicity: use full move numbers based on absolute position (we don't have ply count handy
   // — just emit "X." before white moves).
   for (const e of edges) {
-    if (e.mover === 'w') { out.push(`${moveNum}.`); out.push(e.san); }
-    else { out.push(e.san); moveNum++; }
+    if (e.mover === 'w') {
+      out.push(`${moveNum}.`);
+      out.push(e.san);
+    } else {
+      if (ply === startingPly) out.push(`${moveNum}...`);
+      out.push(e.san);
+      moveNum++;
+    }
+    ply++;
   }
   return out.join(' ');
 }
@@ -233,24 +241,6 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
     ? selectedLine.path[selectedPly - 1] ?? null
     : null;
 
-  useEffect(() => {
-    function onKeyDown(e: KeyboardEvent) {
-      const target = e.target as HTMLElement | null;
-      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
-      if (!selectedLine || selectedPly === null) return;
-      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-      e.preventDefault();
-      setSelectedPly(p => {
-        const cur = p ?? selectedLine.path.length;
-        return e.key === 'ArrowLeft'
-          ? Math.max(0, cur - 1)
-          : Math.min(selectedLine.path.length, cur + 1);
-      });
-    }
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [selectedLine, selectedPly]);
-
   function selectLine(line: LineItem) {
     setSelectedLine(line);
     setSelectedPly(line.path.length);
@@ -298,8 +288,7 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
   // Find inbound edge for currently displayed fen (for SRS panel and orientation).
   const inEdges = useMemo(() => edges.filter(e => e.childFen === displayedFen), [edges, displayedFen]);
   const userInEdges = useMemo(() => inEdges.filter(e => e.mover === repertoire.color && !e.isScaffold), [inEdges, repertoire.color]);
-  const primaryInEdge = inEdges[0] ?? null;
-  const orientation: 'white' | 'black' = primaryInEdge ? (primaryInEdge.mover === 'w' ? 'black' : 'white') : (repertoire.color === 'w' ? 'white' : 'black');
+  const orientation: 'white' | 'black' = repertoire.color === 'w' ? 'white' : 'black';
 
   return (
     <div className="layout">
@@ -313,6 +302,9 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
           size={boardSize}
           resizable
           onSizeChange={onBoardSizeChange}
+          historyIndex={selectedLine ? selectedPly ?? selectedLine.path.length : undefined}
+          historyLength={selectedLine ? selectedLine.path.length : undefined}
+          onHistoryIndexChange={selectedLine ? setSelectedPly : undefined}
         />
         {selectedLine && (
           <div className="panel selected-line-panel">
@@ -354,7 +346,7 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
                   selectedLeafFen={selectedLine?.leafFen ?? null}
                   onSelect={selectLine}
                   repertoireColor={repertoire.color}
-                  boardThumbSize={140}
+                  boardThumbSize={112}
                 />
               ))}
             </div>
@@ -463,7 +455,7 @@ function OpeningGroupView({ group, selectedLeafFen, onSelect, repertoireColor, b
   const totalLineCount = countAllLines(group);
 
   return (
-    <div className="opening-folder">
+    <div className={'opening-folder' + (open ? ' open' : ' closed')}>
       <div
         onClick={() => setOpen(o => !o)}
         className="opening-folder-head"
@@ -475,7 +467,7 @@ function OpeningGroupView({ group, selectedLeafFen, onSelect, repertoireColor, b
               orientation={previewOrientation}
               onMove={() => false}
               allowMoves={false}
-              size={92}
+              size={72}
               showNotation={false}
             />
           </div>
@@ -502,25 +494,23 @@ function OpeningGroupView({ group, selectedLeafFen, onSelect, repertoireColor, b
               ))}
             </div>
           )}
-          {group.lines.length > 0 && (
-            <div>
-              {group.subfolders.length > 0 && (
-                <div style={{ padding: '8px 12px', fontSize: '12px', color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.05em' }}>
-                  Other positions
-                </div>
-              )}
-              <div className="opening-lines-grid">
-                {group.lines.map(l => (
-                  <LineCard
-                    key={l.leafFen + l.fullSan}
-                    line={l}
-                    selected={l.leafFen === selectedLeafFen}
-                    onClick={() => onSelect(l)}
-                    boardSize={boardThumbSize}
-                  />
-                ))}
-              </div>
-            </div>
+          {group.lines.length > 0 && group.subfolders.length > 0 && (
+            <OtherPositionsFolder
+              lines={group.lines}
+              selectedLeafFen={selectedLeafFen}
+              onSelect={onSelect}
+              boardThumbSize={boardThumbSize}
+              repertoireColor={repertoireColor}
+            />
+          )}
+          {group.lines.length > 0 && group.subfolders.length === 0 && (
+            <LineGrid
+              lines={group.lines}
+              selectedLeafFen={selectedLeafFen}
+              onSelect={onSelect}
+              boardThumbSize={boardThumbSize}
+              repertoireColor={repertoireColor}
+            />
           )}
         </>
       )}
@@ -541,7 +531,7 @@ function VariationFolderView({ folder, selectedLeafFen, onSelect, repertoireColo
   const totalLineCount = countAllLines(folder);
 
   return (
-    <div className="variation-folder">
+    <div className={'variation-folder' + (open ? ' open' : ' closed')}>
       <div
         onClick={() => setOpen(o => !o)}
         className="variation-folder-head"
@@ -552,7 +542,7 @@ function VariationFolderView({ folder, selectedLeafFen, onSelect, repertoireColo
             orientation={previewOrientation}
             onMove={() => false}
             allowMoves={false}
-            size={64}
+            size={52}
             showNotation={false}
           />
         </div>
@@ -578,17 +568,13 @@ function VariationFolderView({ folder, selectedLeafFen, onSelect, repertoireColo
             </div>
           )}
           {folder.lines.length > 0 && (
-            <div className="opening-lines-grid">
-              {folder.lines.map(l => (
-                <LineCard
-                  key={l.leafFen + l.fullSan}
-                  line={l}
-                  selected={l.leafFen === selectedLeafFen}
-                  onClick={() => onSelect(l)}
-                  boardSize={boardThumbSize}
-                />
-              ))}
-            </div>
+            <LineGrid
+              lines={folder.lines}
+              selectedLeafFen={selectedLeafFen}
+              onSelect={onSelect}
+              boardThumbSize={boardThumbSize}
+              repertoireColor={repertoireColor}
+            />
           )}
         </>
       )}
@@ -596,10 +582,66 @@ function VariationFolderView({ folder, selectedLeafFen, onSelect, repertoireColo
   );
 }
 
-function LineCard({ line, selected, onClick, boardSize }: { line: LineItem; selected: boolean; onClick: () => void; boardSize: number }) {
-  // Pick orientation based on the last edge's mover (the side that just moved).
-  const lastEdge = line.path[line.path.length - 1];
-  const orientation: 'white' | 'black' = lastEdge?.mover === 'w' ? 'black' : 'white';
+function OtherPositionsFolder({ lines, selectedLeafFen, onSelect, boardThumbSize, repertoireColor }: {
+  lines: LineItem[];
+  selectedLeafFen: NormFen | null;
+  onSelect: (l: LineItem) => void;
+  boardThumbSize: number;
+  repertoireColor: Repertoire['color'];
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={'variation-folder other-positions-folder' + (open ? ' open' : ' closed')}>
+      <div className="variation-folder-head other-positions-head" onClick={() => setOpen(o => !o)}>
+        <strong className="folder-title">Other Positions</strong>
+        <span className="folder-count muted small">{lines.length} line{lines.length === 1 ? '' : 's'}</span>
+        <span className="spacer" />
+        <span className="folder-toggle muted small">{open ? 'v' : '>'}</span>
+      </div>
+      {open && (
+        <LineGrid
+          lines={lines}
+          selectedLeafFen={selectedLeafFen}
+          onSelect={onSelect}
+          boardThumbSize={boardThumbSize}
+          repertoireColor={repertoireColor}
+        />
+      )}
+    </div>
+  );
+}
+
+function LineGrid({ lines, selectedLeafFen, onSelect, boardThumbSize, repertoireColor }: {
+  lines: LineItem[];
+  selectedLeafFen: NormFen | null;
+  onSelect: (l: LineItem) => void;
+  boardThumbSize: number;
+  repertoireColor: Repertoire['color'];
+}) {
+  return (
+    <div className="opening-lines-grid">
+      {lines.map(l => (
+        <LineCard
+          key={l.leafFen + l.fullSan}
+          line={l}
+          selected={l.leafFen === selectedLeafFen}
+          onClick={() => onSelect(l)}
+          boardSize={boardThumbSize}
+          repertoireColor={repertoireColor}
+        />
+      ))}
+    </div>
+  );
+}
+
+function LineCard({ line, selected, onClick, boardSize, repertoireColor }: {
+  line: LineItem;
+  selected: boolean;
+  onClick: () => void;
+  boardSize: number;
+  repertoireColor: Repertoire['color'];
+}) {
+  const orientation: 'white' | 'black' = repertoireColor === 'w' ? 'white' : 'black';
   return (
     <div
       className={'line-card' + (selected ? ' selected' : '')}

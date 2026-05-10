@@ -23,6 +23,9 @@ export interface BoardProps {
   maxSize?: number;
   onSizeChange?: (size: number) => void;
   showNotation?: boolean;
+  historyIndex?: number;
+  historyLength?: number;
+  onHistoryIndexChange?: (index: number) => void;
   // Optional flash class on outer wrapper (e.g. 'board-flash-good' / 'board-flash-bad')
   flashClass?: string;
 }
@@ -42,11 +45,15 @@ export function Board({
   maxSize = 900,
   onSizeChange,
   showNotation = true,
+  historyIndex,
+  historyLength,
+  onHistoryIndexChange,
   flashClass,
 }: BoardProps) {
   const { preferences } = useBoardPreferences();
   const positionFen = denormalizeFen(fen);
   const [selected, setSelected] = useState<string | null>(null);
+  const [dragOrigin, setDragOrigin] = useState<string | null>(null);
   const [markedSquares, setMarkedSquares] = useState<Set<string>>(() => new Set());
   const [userArrows, setUserArrows] = useState<BoardProps['arrows']>([]);
   const dragRef = useRef<{ startX: number; startY: number; startSize: number; frame: number | null } | null>(null);
@@ -68,12 +75,33 @@ export function Board({
   }, [fen, allowMoves]);
 
   useEffect(() => {
+    setDragOrigin(null);
+  }, [fen, allowMoves]);
+
+  useEffect(() => {
     const previousFen = previousFenRef.current;
     previousFenRef.current = fen;
     if (previousFen === fen || areOneMoveApart(previousFen, fen)) return;
     setMarkedSquares(new Set());
     setUserArrows([]);
   }, [fen]);
+
+  useEffect(() => {
+    if (!onHistoryIndexChange || historyIndex === undefined || historyLength === undefined) return;
+    const currentHistoryIndex = historyIndex;
+    const currentHistoryLength = historyLength;
+    const changeHistoryIndex = onHistoryIndexChange;
+    function onKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      const delta = e.key === 'ArrowLeft' ? -1 : 1;
+      changeHistoryIndex(Math.max(0, Math.min(currentHistoryLength, currentHistoryIndex + delta)));
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [historyIndex, historyLength, onHistoryIndexChange]);
 
   // Build squareStyles: highlights + selection + legal-target dots.
   const squareStyles = useMemo(() => {
@@ -105,8 +133,14 @@ export function Board({
         // ignore
       }
     }
+    if (preferences.hideDragGhost && dragOrigin) {
+      styles[dragOrigin] = {
+        ...(styles[dragOrigin] || {}),
+        boxShadow: 'inset 0 0 0 4px rgba(245, 211, 90, 0.95)',
+      };
+    }
     return styles;
-  }, [highlights, markedSquares, selected, fen]);
+  }, [highlights, markedSquares, selected, fen, preferences.hideDragGhost, dragOrigin]);
 
   function attemptMove(from: string, to: string, promotion: string = 'q'): boolean {
     const ok = onMove({ from, to, promotion });
@@ -237,6 +271,7 @@ export function Board({
           arrows: [...(arrows || []), ...(userArrows || [])].map(a => ({ startSquare: a.startSquare, endSquare: a.endSquare, color: a.color ?? 'rgba(255,255,255,0.6)' })),
           boardStyle: { width: '100%' },
           draggingPieceStyle: { cursor: 'grabbing' },
+          draggingPieceGhostStyle: preferences.hideDragGhost ? { opacity: 0 } : undefined,
           ...(customPieces ? { pieces: customPieces } : {}),
           canDragPiece: ({ piece }) => {
             if (!allowMoves) return false;
@@ -244,8 +279,12 @@ export function Board({
             return piece.pieceType.startsWith(allowedDragColor);
           },
           onPieceDrop: ({ sourceSquare, targetSquare }) => {
+            setDragOrigin(null);
             if (!allowMoves || !targetSquare) return false;
             return attemptMove(sourceSquare, targetSquare);
+          },
+          onPieceDrag: ({ square }) => {
+            setDragOrigin(square ?? null);
           },
           onPieceClick: ({ square, piece }) => {
             if (!square) return;

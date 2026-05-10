@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Board } from '../components/Board';
+import { ClozePrompt } from '../components/ClozePrompt';
 import { applyMove, computeOpeningFen, turnAt, STARTING_FEN_NORM } from '../lib/chess';
 import { findOpening } from '../lib/openings';
 import {
@@ -91,9 +92,10 @@ export interface TrainModeProps {
   refreshKey: number;
   boardSize: number;
   onBoardSizeChange: (size: number) => void;
+  onSessionActiveChange?: (active: boolean) => void;
 }
 
-export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onBoardSizeChange }: TrainModeProps) {
+export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onBoardSizeChange, onSessionActiveChange }: TrainModeProps) {
   const { preferences: trainingPreferences } = useTrainingPreferences();
   const [phase, setPhase] = useState<Phase>({ kind: 'setup' });
   const [stats, setStats] = useState<SessionStats>(emptyStats());
@@ -109,10 +111,12 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
   const [animateComputerMove, setAnimateComputerMove] = useState(false);
   const [loadingHistoryProgress, setLoadingHistoryProgress] = useState<ProgressByCard>({});
   const [loadingHistoryAnswerShown, setLoadingHistoryAnswerShown] = useState(false);
+  const [lineViewIdx, setLineViewIdx] = useState<number | null>(null);
 
   // "Two in the queue": pre-generate up to 2 lines in the background while the user trains,
   // so subsequent Learn sessions start instantly without a loading screen.
   const preGenRef = useRef<{ queue: GeneratedLine[]; abort: AbortController | null }>({ queue: [], abort: null });
+  const fallbackReviewRef = useRef(false);
   const repertoireRef = useRef(repertoire);
   repertoireRef.current = repertoire;
 
@@ -149,7 +153,8 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     // Clear pre-gen queue and abort any in-flight generation when switching repertoires.
     preGenRef.current.abort?.abort();
     preGenRef.current = { queue: [], abort: null };
-    setPhase({ kind: 'setup' }); setStats(emptyStats()); setQueuedPremove(null);
+    fallbackReviewRef.current = false;
+    setPhase({ kind: 'setup' }); setStats(emptyStats()); setQueuedPremove(null); setLineViewIdx(null);
     setFrontierCopyStatus(null);
     setPrepOpeningKey(repertoire.openingKey ?? '');
   }, [repertoire.id]);
@@ -161,6 +166,18 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
   useEffect(() => {
     (async () => setLoadingHistoryProgress(await getHistoryProgress()))();
   }, [refreshKey]);
+
+  useEffect(() => {
+    onSessionActiveChange?.(phase.kind !== 'setup' && phase.kind !== 'done');
+  }, [phase.kind, onSessionActiveChange]);
+
+  useEffect(() => {
+    if (phase.kind !== 'walkthrough' && phase.kind !== 'test') {
+      setLineViewIdx(null);
+      return;
+    }
+    setLineViewIdx(phase.sub === 'good-flash' ? phase.cursorIdx + 1 : phase.cursorIdx);
+  }, [phase.kind, phase.kind === 'walkthrough' || phase.kind === 'test' ? phase.cursorIdx : null, phase.kind === 'walkthrough' || phase.kind === 'test' ? phase.sub : null]);
 
   const dueCount = useMemo(() => {
     const now = new Date();
@@ -244,6 +261,7 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
       setGenTrace(prev => [...prev, line]);
     };
     trace(`Session requested: mode=${mode}, repertoire="${repertoire.name}", color=${repertoire.color}, root=${repertoire.rootFen}`);
+    fallbackReviewRef.current = mode === 'learn-and-review' && dueCount === 0;
     if (mode === 'review-only') {
       trace('Review-only mode selected; line generation skipped.');
       void enterReviewPhase(mode);
@@ -564,7 +582,8 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
 
   async function enterReviewPhase(mode: SessionMode) {
     const fresh = await getEdgesByMover(repertoire.id, repertoire.color);
-    const queue = buildReviewQueue(fresh, mode === 'learn-and-review', trainingPreferences.reviewSessionLength);
+    const queue = buildReviewQueue(fresh, mode === 'learn-and-review', trainingPreferences.reviewSessionLength, fallbackReviewRef.current);
+    fallbackReviewRef.current = false;
     if (queue.length === 0) {
       setPhase({ kind: 'done', mode });
       return;
@@ -621,6 +640,20 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
       setTimeout(() => triggerOverride(edge, result.uci, p.kind), BAD_FLASH_MS + 50);
     }
     return true;
+  }
+
+  function revealCurrentHint() {
+    setPhase(p => {
+      if (p.kind === 'walkthrough' || p.kind === 'test') {
+        const edge = p.line.fullPath[p.cursorIdx];
+        if (!edge || !isTrainableEdge(edge, repertoire.color) || p.sub !== 'await') return p;
+        return { ...p, wrongCount: Math.max(p.wrongCount, HINT_AFTER_WRONG_COUNT) };
+      }
+      if (p.kind === 'review' && p.sub === 'await') {
+        return { ...p, wrongCount: Math.max(p.wrongCount, HINT_AFTER_WRONG_COUNT) };
+      }
+      return p;
+    });
   }
 
   async function triggerOverride(edge: Edge, attemptedUci: string, comesFrom: 'walkthrough' | 'test') {
@@ -781,7 +814,8 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
 
   async function reloadAndEnterReview(mode: SessionMode) {
     const fresh = await getEdgesByMover(repertoire.id, repertoire.color);
-    const queue = buildReviewQueue(fresh, mode === 'learn-and-review', trainingPreferences.reviewSessionLength);
+    const queue = buildReviewQueue(fresh, mode === 'learn-and-review', trainingPreferences.reviewSessionLength, fallbackReviewRef.current);
+    fallbackReviewRef.current = false;
     if (queue.length === 0) {
       setPhase({ kind: 'done', mode });
       return;
@@ -1175,57 +1209,73 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     const showHintArrow = isYour && phase.sub === 'await' && (
       phase.kind === 'walkthrough' || phase.wrongCount >= HINT_AFTER_WRONG_COUNT
     );
+    const currentDisplayIdx = phase.sub === 'good-flash' ? phase.cursorIdx + 1 : phase.cursorIdx;
+    const viewIdx = Math.max(0, Math.min(phase.line.fullPath.length, lineViewIdx ?? currentDisplayIdx));
+    const viewingCurrentPrompt = viewIdx === currentDisplayIdx;
+    const viewedLastMove = viewIdx > 0 ? phase.line.fullPath[viewIdx - 1] ?? null : null;
+    const viewedPromptMove = viewIdx < phase.line.fullPath.length ? phase.line.fullPath[viewIdx] ?? null : null;
     const arrows = [
-      ...(showHintArrow
+      ...(viewingCurrentPrompt && showHintArrow
         ? [{ startSquare: cur.uci.slice(0, 2), endSquare: cur.uci.slice(2, 4), color: 'rgba(74,144,226,0.9)' }]
         : []),
-      ...(queuedPremove
+      ...(!viewingCurrentPrompt && viewedPromptMove
+        ? [{ startSquare: viewedPromptMove.uci.slice(0, 2), endSquare: viewedPromptMove.uci.slice(2, 4), color: 'rgba(74,144,226,0.55)' }]
+        : []),
+      ...(viewingCurrentPrompt && queuedPremove
         ? [{ startSquare: queuedPremove.from, endSquare: queuedPremove.to, color: 'rgba(240,180,45,0.9)' }]
         : []),
     ];
-    // After good-flash the move has been played; show the resulting position briefly.
-    const boardFen = phase.sub === 'good-flash' ? cur.childFen : cur.parentFen;
-    const flashClass = phase.sub === 'good-flash' ? 'board-flash-good' : phase.sub === 'bad-flash' ? 'board-flash-bad' : undefined;
-    const turn = turnAt(cur.parentFen);
-    const pillStates = computePillStates(phase, repertoire.color);
-    const sanLineUpToHere = renderSanFromEdges(phase.line.fullPath.slice(0, phase.cursorIdx));
-    const lastMove = phase.sub === 'good-flash' ? cur : phase.line.fullPath[phase.cursorIdx - 1] ?? null;
+    const boardFen = viewIdx === 0 ? cur.parentFen : phase.line.fullPath[viewIdx - 1]?.childFen ?? cur.parentFen;
+    const flashClass = viewingCurrentPrompt
+      ? phase.sub === 'good-flash' ? 'board-flash-good' : phase.sub === 'bad-flash' ? 'board-flash-bad' : undefined
+      : undefined;
+    const turn = turnAt(boardFen);
+    const pillStates = computePillStates(phase, repertoire.color, viewIdx);
+    const sanLineUpToHere = renderSanFromEdges(phase.line.fullPath.slice(0, viewIdx));
     const sourceEdge = findSourceEdge(phase.line.fullPath, phase.cursorIdx, repertoire.color);
+    const canHint = viewingCurrentPrompt && phase.sub === 'await' && isYour;
 
     return (
-      <div className="layout">
+      <div className="layout training-layout">
         <div>
-          <Board
-            fen={boardFen}
-            orientation={orientation}
-            onMove={(m) => {
-              if (phase.sub === 'await' && isYour) {
-                const valid = applyMove(cur.parentFen, m);
-                if (!valid) return false;
-                void attemptUserMove(m);
-                return true;
-              }
-              if (premoveTarget && applyMove(premoveTarget.parentFen, m)) {
-                setQueuedPremove(m);
-              }
-              return false;
-            }}
-            allowMoves={(phase.sub === 'await' && isYour) || !!premoveTarget}
-            allowedDragColor={repertoire.color}
-            arrows={arrows}
-            highlights={lastMove ? lastMoveHighlights(lastMove) : undefined}
-            flashClass={flashClass}
-            size={boardSize}
-            resizable
-            onSizeChange={onBoardSizeChange}
-          />
+          <div className="training-board-shell">
+            <Board
+              fen={boardFen}
+              orientation={orientation}
+              onMove={(m) => {
+                if (viewingCurrentPrompt && phase.sub === 'await' && isYour) {
+                  const valid = applyMove(cur.parentFen, m);
+                  if (!valid) return false;
+                  void attemptUserMove(m);
+                  return true;
+                }
+                if (viewingCurrentPrompt && premoveTarget && applyMove(premoveTarget.parentFen, m)) {
+                  setQueuedPremove(m);
+                }
+                return false;
+              }}
+              allowMoves={viewingCurrentPrompt && ((phase.sub === 'await' && isYour) || !!premoveTarget)}
+              allowedDragColor={repertoire.color}
+              arrows={arrows}
+              highlights={viewedLastMove ? lastMoveHighlights(viewedLastMove) : undefined}
+              flashClass={flashClass}
+              size={boardSize}
+              resizable
+              onSizeChange={onBoardSizeChange}
+              historyIndex={viewIdx}
+              historyLength={phase.line.fullPath.length}
+              onHistoryIndexChange={setLineViewIdx}
+            />
+            <div className="training-board-actions">
+              <button onClick={revealCurrentHint} disabled={!canHint}>Hint</button>
+              <button className="danger" onClick={() => setPhase({ kind: 'done', mode: phase.mode })}>End session</button>
+            </div>
+          </div>
           <ProgressPills states={pillStates} />
           <div className="row" style={{ marginTop: 10 }}>
             <span className="muted small">
               {phase.kind === 'walkthrough' ? 'Walkthrough' : `Test pass ${phase.passNumber}`} · {turn === 'w' ? 'White' : 'Black'} to move
             </span>
-            <span className="spacer" />
-            <button className="danger" onClick={() => setPhase({ kind: 'done', mode: phase.mode })}>End session</button>
           </div>
         </div>
         <div>
@@ -1281,34 +1331,39 @@ export function TrainMode({ repertoire, onDataChange, refreshKey, boardSize, onB
     const flashClass = phase.sub === 'good-flash' ? 'board-flash-good' : phase.sub === 'bad-flash' ? 'board-flash-bad' : undefined;
     const lastMoveHighlightsForReview = phase.sub === 'good-flash' ? lastMoveHighlights(card) : undefined;
     return (
-      <div className="layout">
+      <div className="layout training-layout">
         <div>
-          <Board
-            fen={boardFen}
-            orientation={orientation}
-            onMove={(m) => {
-              if (phase.sub !== 'await') return false;
-              const valid = applyMove(card.parentFen, m);
-              if (!valid) return false;
-              void attemptReviewMove(m);
-              return true;
-            }}
-            allowMoves={phase.sub === 'await'}
-            allowedDragColor={repertoire.color}
-            arrows={phase.sub === 'await' && phase.wrongCount >= HINT_AFTER_WRONG_COUNT
-              ? [{ startSquare: card.uci.slice(0, 2), endSquare: card.uci.slice(2, 4), color: 'rgba(74,144,226,0.9)' }]
-              : []}
-            highlights={lastMoveHighlightsForReview}
-            flashClass={flashClass}
-            size={boardSize}
-            resizable
-            onSizeChange={onBoardSizeChange}
-          />
+          <div className="training-board-shell">
+            <Board
+              fen={boardFen}
+              orientation={orientation}
+              onMove={(m) => {
+                if (phase.sub !== 'await') return false;
+                const valid = applyMove(card.parentFen, m);
+                if (!valid) return false;
+                void attemptReviewMove(m);
+                return true;
+              }}
+              allowMoves={phase.sub === 'await'}
+              allowedDragColor={repertoire.color}
+              arrows={phase.sub === 'await' && phase.wrongCount >= HINT_AFTER_WRONG_COUNT
+                ? [{ startSquare: card.uci.slice(0, 2), endSquare: card.uci.slice(2, 4), color: 'rgba(74,144,226,0.9)' }]
+                : []}
+              highlights={lastMoveHighlightsForReview}
+              flashClass={flashClass}
+              size={boardSize}
+              resizable
+              onSizeChange={onBoardSizeChange}
+            />
+            <div className="training-board-actions">
+              <button onClick={revealCurrentHint} disabled={phase.sub !== 'await'}>Hint</button>
+              <button className="danger" onClick={() => setPhase({ kind: 'done', mode: phase.mode })}>End session</button>
+            </div>
+          </div>
           <div className="row" style={{ marginTop: 10 }}>
             <span className="muted small">Review {phase.idx + 1} / {phase.queue.length}</span>
             <span className="spacer" />
             <button onClick={handleSkipReview} disabled={phase.sub !== 'await'}>Skip</button>
-            <button className="danger" onClick={() => setPhase({ kind: 'done', mode: phase.mode })}>End</button>
           </div>
         </div>
         <div>
@@ -1358,20 +1413,23 @@ function choosePrepBranch(queue: PrepBranch[]): PrepBranch | null {
   ))[0];
 }
 
-function buildReviewQueue(edges: Edge[], includeFallback: boolean, cap: number): Edge[] {
+function buildReviewQueue(edges: Edge[], includeFallback: boolean, cap: number, forceFallback = false): Edge[] {
   const now = new Date();
   const due = edges
     .filter(e => isDue(e, now))
     .sort((a, b) => new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime());
-  if (due.length > 0 || !includeFallback) return due.slice(0, cap);
-  return [...edges]
+  if (!includeFallback) return due.slice(0, cap);
+  if (due.length > 0 && !forceFallback) return due.slice(0, cap);
+  const dueIds = new Set(due.map(edge => edge.id));
+  const fallback = edges
+    .filter(edge => !dueIds.has(edge.id))
     .sort((a, b) => {
       const aReviewed = a.lastReviewedAt ? new Date(a.lastReviewedAt).getTime() : 0;
       const bReviewed = b.lastReviewedAt ? new Date(b.lastReviewedAt).getTime() : 0;
       if (aReviewed !== bReviewed) return aReviewed - bReviewed;
       return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-    })
-    .slice(0, cap);
+    });
+  return [...due, ...fallback].slice(0, cap);
 }
 
 function SourceGamePanel({ edge, line, color }: { edge: Edge | null; line: Edge[]; color: Repertoire['color'] }) {
@@ -1590,17 +1648,10 @@ function LoadingHistoryCard({ cardState, answerShown, onToggleAnswer, onGrade }:
   onToggleAnswer: () => void;
   onGrade: (knewIt: boolean) => void;
 }) {
-  const [before, after] = cardState.card.prompt.split('{{C1}}');
   return (
     <div className="cloze-card">
       <div className="muted small">While Chesski builds the line</div>
-      <div className="cloze-prompt">
-        {before}
-        <button className={'cloze-blank history-answer' + (answerShown ? ' revealed' : '')} onClick={onToggleAnswer} title="Click to pin answer">
-          {cardState.card.answer}
-        </button>
-        {after}
-      </div>
+      <ClozePrompt card={cardState.card} answerShown={answerShown} onToggleAnswer={onToggleAnswer} />
       <div className="row history-actions">
         <button className="primary" onClick={() => onGrade(true)}>Knew it</button>
         <button onClick={() => onGrade(false)}>Couldn't pull it</button>
@@ -1691,17 +1742,18 @@ function ProgressPills({ states }: { states: PillState[] }) {
   );
 }
 
-function computePillStates(phase: Phase, color: Repertoire['color']): PillState[] {
+function computePillStates(phase: Phase, color: Repertoire['color'], displayCursorIdx?: number): PillState[] {
   if (phase.kind !== 'walkthrough' && phase.kind !== 'test') return [];
   // Pills represent the user's NEW your-color moves (i.e., newEdges that are your color).
   const yourNewEdges = phase.line.newEdges.filter(e => isTrainableEdge(e, color));
   // The cursor tells us which of those is currently being interacted with.
-  const cur = phase.line.fullPath[phase.cursorIdx];
+  const cursorIdx = displayCursorIdx ?? phase.cursorIdx;
+  const cur = cursorIdx < phase.line.fullPath.length ? phase.line.fullPath[cursorIdx] : null;
   return yourNewEdges.map(e => {
     if (cur && e.id === cur.id) return 'current';
     // Did the cursor pass it already?
     const idxOfE = phase.line.fullPath.findIndex(x => x.id === e.id);
-    if (idxOfE >= 0 && idxOfE < phase.cursorIdx) {
+    if (idxOfE >= 0 && idxOfE < cursorIdx) {
       // Look at gradedEdges for failure detection.
       if (phase.kind === 'test' && phase.gradedEdges.has(e.id)) {
         // We don't have a "failed" set on the phase; derive: if reps was incremented (pass) vs lapses (fail).

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { ClozePrompt, historyCardSummary } from '../components/ClozePrompt';
 import { CHESS_HISTORY_CLOZE } from '../lib/chessHistory';
 import {
   buildHistoryCardStates,
@@ -67,7 +68,6 @@ export function HistoryMode({ onProgressChange }: HistoryModeProps) {
 
   if (!loaded) return null;
 
-  const [before, after] = active.card.prompt.split('{{C1}}');
   const activeDue = isHistoryDue(active.progress, now);
 
   return (
@@ -82,17 +82,7 @@ export function HistoryMode({ onProgressChange }: HistoryModeProps) {
           <div className="muted small">
             {activeDue ? 'Due now' : `Next review in ${nextDueLabel(active.progress, now)}`}
           </div>
-          <div className="cloze-prompt">
-            {before}
-            <button
-              className={'cloze-blank history-answer' + (showAnswer ? ' revealed' : '')}
-              onClick={() => setShowAnswer(answer => !answer)}
-              title="Click to pin answer"
-            >
-              {active.card.answer}
-            </button>
-            {after}
-          </div>
+          <ClozePrompt card={active.card} answerShown={showAnswer} onToggleAnswer={() => setShowAnswer(answer => !answer)} />
           <div className="row history-actions">
             <button className="primary" onClick={() => grade(active.id, true)}>Did know</button>
             <button onClick={() => grade(active.id, false)}>Didn't know that</button>
@@ -111,7 +101,7 @@ export function HistoryMode({ onProgressChange }: HistoryModeProps) {
           {cardStats.map(item => (
             <div key={item.id} className="history-list-row">
               <span className={'history-dot' + (isHistoryDue(item.progress, now) ? ' due' : item.progress.reps > 0 ? ' known' : '')} />
-              <span>{item.card.answer}</span>
+              <span>{historyCardSummary(item.card)}</span>
               <span className="spacer" />
               <span className="muted small">
                 {item.progress.reps > 0 ? `${item.progress.reps}x - ${nextDueLabel(item.progress, now)}` : 'new'}

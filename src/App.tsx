@@ -46,6 +46,7 @@ function AppContent() {
   const [showFirstRunOnboarding, setShowFirstRunOnboarding] = useState(false);
   const [starterNotice, setStarterNotice] = useState(false);
   const [importNotice, setImportNotice] = useState(false);
+  const [trainingSessionActive, setTrainingSessionActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const accountSyncTimerRef = useRef<number | null>(null);
 
@@ -288,7 +289,7 @@ function AppContent() {
 
   return (
     <div className="app">
-      <div className="tabs">
+      <div className={'tabs' + (trainingSessionActive && tab === 'train' ? ' session-locked' : '')}>
         <button className={'tab' + (tab === 'home' ? ' active' : '')} onClick={() => setTab('home')}>
           Home
         </button>
@@ -364,7 +365,7 @@ function AppContent() {
               onChoose={handleChooseRepertoire}
             />
           )}
-          {tab === 'train' && <TrainMode repertoire={activeRep} onDataChange={onDataChange} refreshKey={refreshKey} boardSize={boardSize} onBoardSizeChange={setBoardSize} />}
+          {tab === 'train' && <TrainMode repertoire={activeRep} onDataChange={onDataChange} refreshKey={refreshKey} boardSize={boardSize} onBoardSizeChange={setBoardSize} onSessionActiveChange={setTrainingSessionActive} />}
           {tab === 'browse' && <BrowseMode repertoire={activeRep} onDataChange={onDataChange} refreshKey={refreshKey} boardSize={boardSize} onBoardSizeChange={setBoardSize} />}
           {tab === 'review' && <ReviewMode repertoire={activeRep} onDataChange={onDataChange} />}
           {tab === 'game-import' && (

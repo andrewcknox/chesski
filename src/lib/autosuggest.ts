@@ -649,7 +649,7 @@ export interface PathStep {
 export async function findTopFrontier(rep: Repertoire, signal?: AbortSignal, trace?: GenerationTrace): Promise<FrontierResult | null> {
   const queued = await getOpenFrontiers(rep.id);
   traceStep(trace, `Frontier queue: loaded ${queued.length} open candidate${queued.length === 1 ? '' : 's'} for "${rep.name}".`);
-  for (const candidate of queued) {
+  for (const candidate of randomizeNewCardIntroOrder(queued)) {
     const hydrated = await hydrateFrontierCandidate(rep, candidate, trace);
     if (hydrated) {
       traceStep(trace, `Frontier queue: using stored candidate ${candidate.san} (${candidate.uci}); weight=${candidate.weight.toFixed(5)}, childFen=${candidate.childFen}.`);
@@ -979,9 +979,30 @@ async function findTopUnansweredOpponentMove(rep: Repertoire, signal?: AbortSign
   frontiers.sort((a, b) => (b.weight - a.weight) || (b.games - a.games));
   await putFrontiers(frontiers.map(frontier => frontierCandidateFromDiscovery(rep, frontier)));
   traceStep(trace, `Frontier queue: stored ${frontiers.length} open candidate${frontiers.length === 1 ? '' : 's'} for "${rep.name}".`);
-  const winner = frontiers[0];
+  const winner = randomizeNewCardIntroOrder(frontiers)[0];
   traceStep(trace, `Frontier search: selected frontier weight=${winner.weight.toFixed(5)}, games=${winner.games}, fen=${winner.fen}, pathLength=${winner.path.length}`);
   return { fen: winner.fen, cumulativeProbability: winner.weight, candidateId: frontierId(rep.id, winner.parentFen, winner.uci), path: winner.path };
+}
+
+function randomizeNewCardIntroOrder<T extends { weight: number; games: number }>(candidates: T[]): T[] {
+  if (candidates.length <= 1) return candidates;
+  const sorted = [...candidates].sort((a, b) => (b.weight - a.weight) || (b.games - a.games));
+  const best = sorted[0];
+  const topPool = sorted.filter(candidate => {
+    const closeWeight = best.weight === 0 ? candidate.weight === 0 : candidate.weight >= best.weight * 0.8;
+    return closeWeight && candidate.games >= best.games * 0.5;
+  }).slice(0, 5);
+  const rest = sorted.filter(candidate => !topPool.includes(candidate));
+  return [...shuffle(topPool), ...rest];
+}
+
+function shuffle<T>(items: T[]): T[] {
+  const shuffled = [...items];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
 }
 
 async function getOpponentMovesForFrontier(
