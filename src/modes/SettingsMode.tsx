@@ -1,31 +1,32 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   clearUserPlayerBook,
-  getPlayerBookStats,
   importUserPlayerBookFromPgn,
-  type PlayerBookStats,
 } from '../lib/playerBook';
 import {
   DEFAULT_RECOMMENDATION_SETTINGS,
-  RECOMMENDATION_CHOICES,
-  RECOMMENDATION_PACKS,
   getRecommendationSettings,
-  prioritiesFromSources,
   setRecommendationSettings,
-  type RecommendationSourceChoice,
-  type RecommendationSourceKey,
   type RecommendationSettings,
 } from '../lib/recommendationSettings';
 import {
+  ACCENT_COLOR_OPTIONS,
   APP_THEME_OPTIONS,
   BOARD_THEME_OPTIONS,
   PIECE_SET_OPTIONS,
+  type AccentColorKey,
   type AppThemeKey,
   type BoardThemeKey,
   type PieceSetKey,
   useBoardPreferences,
 } from '../lib/boardPreferences';
-import { useTrainingPreferences } from '../lib/trainingPreferences';
+import {
+  MAX_REVIEW_LINE_PLAYBACK_DELAY_MS,
+  MIN_REVIEW_LINE_PLAYBACK_DELAY_MS,
+  useTrainingPreferences,
+} from '../lib/trainingPreferences';
+import { HistoryMode } from './HistoryMode';
+import { HelpDocsModal } from './HelpDocsMode';
 
 const MIN_ANIMATION_MS = 40;
 const MAX_ANIMATION_MS = 260;
@@ -45,29 +46,27 @@ const ALGORITHM_GUIDE_STEPS = [
   },
 ];
 
-export function SettingsMode() {
+export function SettingsMode({ onTriviaProgressChange, onOpenGlobalAlgorithm, onRestartOnboarding }: {
+  onTriviaProgressChange: () => void;
+  onOpenGlobalAlgorithm: () => void;
+  onRestartOnboarding: () => void | Promise<void>;
+}) {
   const { preferences: boardPreferences, updatePreferences } = useBoardPreferences();
   const { preferences: trainingPreferences, updatePreferences: updateTrainingPreferences } = useTrainingPreferences();
   const [settings, setSettingsState] = useState<RecommendationSettings>(DEFAULT_RECOMMENDATION_SETTINGS);
   const [loaded, setLoaded] = useState(false);
-  const [bookStats, setBookStats] = useState<PlayerBookStats[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const [importName, setImportName] = useState('');
   const [importing, setImporting] = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const [guideStep, setGuideStep] = useState(0);
+  const [helpDocsOpen, setHelpDocsOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     (async () => {
       setSettingsState(await getRecommendationSettings());
       setLoaded(true);
-      try {
-        setBookStats(await getPlayerBookStats());
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
     })();
   }, []);
 
@@ -76,26 +75,20 @@ export function SettingsMode() {
     await setRecommendationSettings(next);
   }
 
-  async function reloadStats() {
-    setBookStats(await getPlayerBookStats());
-  }
-
   async function handleImportFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     setImporting(true);
-    setError(null);
     setImportStatus(null);
     try {
       const stats = await importUserPlayerBookFromPgn(await file.text(), importName);
-      await reloadStats();
       setImportStatus(`Imported ${stats.indexedGames.toLocaleString()} games and ${stats.positions.toLocaleString()} positive positions.`);
       await update({
         ...settings,
         playerPriorities: { ...settings.playerPriorities, self: 1 },
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setImportStatus(err instanceof Error ? err.message : String(err));
     } finally {
       setImporting(false);
       e.target.value = '';
@@ -105,90 +98,14 @@ export function SettingsMode() {
   async function handleClearUserBook() {
     if (!window.confirm('Remove the imported games book?')) return;
     await clearUserPlayerBook();
-    await reloadStats();
     setImportStatus('Removed imported games.');
-  }
-
-  function isSourceKey(value: string | null): value is RecommendationSourceKey {
-    return RECOMMENDATION_CHOICES.some(source => source.key === value);
-  }
-
-  function activeSourceKeys(): RecommendationSourceKey[] {
-    return RECOMMENDATION_CHOICES
-      .filter(source => settings.playerPriorities[source.key] > 0)
-      .sort((a, b) => settings.playerPriorities[a.key] - settings.playerPriorities[b.key])
-      .map(source => source.key);
-  }
-
-  function prioritiesFromActive(nextActive: RecommendationSourceKey[]): RecommendationSettings['playerPriorities'] {
-    const next = { ...DEFAULT_RECOMMENDATION_SETTINGS.playerPriorities };
-    for (const source of RECOMMENDATION_CHOICES) next[source.key] = 0;
-    nextActive.forEach((key, index) => {
-      next[key] = index + 1;
-    });
-    return next;
-  }
-
-  async function setActiveSources(nextActive: RecommendationSourceKey[]) {
-    await update({
-      ...settings,
-      playerPriorities: prioritiesFromActive(nextActive),
-    });
-  }
-
-  async function setPlayerBookMaxCpLoss(value: number) {
-    await update({
-      ...settings,
-      playerBookMaxCpLoss: value,
-    });
-  }
-
-  async function applyPack(sources: RecommendationSourceKey[]) {
-    await update({
-      ...settings,
-      playerPriorities: prioritiesFromSources(sources),
-    });
-  }
-
-  function draggedSource(e: React.DragEvent): RecommendationSourceKey | null {
-    const fromEvent = e.dataTransfer.getData('text/plain');
-    return isSourceKey(fromEvent) ? fromEvent : null;
-  }
-
-  function startDrag(e: React.DragEvent, sourceKey: RecommendationSourceKey) {
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', sourceKey);
-  }
-
-  function dropIntoActive(e: React.DragEvent, index?: number) {
-    e.preventDefault();
-    e.stopPropagation();
-    const key = draggedSource(e);
-    if (!key) return;
-    const next = activeSourceKeys().filter(activeKey => activeKey !== key);
-    const target = index ?? next.length;
-    next.splice(Math.max(0, Math.min(target, next.length)), 0, key);
-    void setActiveSources(next);
-  }
-
-  function dropIntoInactive(e: React.DragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    const key = draggedSource(e);
-    if (!key) return;
-    void setActiveSources(activeSourceKeys().filter(activeKey => activeKey !== key));
   }
 
   if (!loaded) return null;
 
-  const playerLabels = new Map<RecommendationSourceKey, string>(
-    bookStats.map(player => [player.key, player.name] as [RecommendationSourceKey, string])
-  );
-  const labelForSource = (source: RecommendationSourceChoice) => playerLabels.get(source.key) ?? source.name;
-  const activeKeys = activeSourceKeys();
-  const activeSources = activeKeys.map(key => RECOMMENDATION_CHOICES.find(source => source.key === key)).filter(Boolean) as RecommendationSourceChoice[];
-  const inactiveSources = RECOMMENDATION_CHOICES.filter(source => !activeKeys.includes(source.key));
   const animationSpeedSliderValue = MAX_ANIMATION_MS + MIN_ANIMATION_MS - boardPreferences.animationSpeedMs;
+  const reviewLinePlaybackSliderValue =
+    MAX_REVIEW_LINE_PLAYBACK_DELAY_MS + MIN_REVIEW_LINE_PLAYBACK_DELAY_MS - trainingPreferences.reviewLinePlaybackDelayMs;
 
   return (
     <div className="layout settings-layout">
@@ -201,270 +118,272 @@ export function SettingsMode() {
         />
       )}
 
-      <div className="panel algorithm-guide-panel">
-        <img src="/chesski-256.png" alt="" className="algorithm-guide-sprite" />
+      {helpDocsOpen && <HelpDocsModal onClose={() => setHelpDocsOpen(false)} />}
+
+      <div className="page-header settings-page-header">
         <div>
-          <h3>Algorithm guide</h3>
-          <div className="muted small settings-copy">
-            A quick click-through tour of source order, move selection, and the player-line quality guard.
-          </div>
-        </div>
-        <button onClick={() => { setGuideStep(0); setGuideOpen(true); }}>Guide me</button>
-      </div>
-
-      <div className="panel board-preferences-panel">
-        <h3>Board and pieces</h3>
-        <div className="settings-copy muted small">
-          Tune the board without changing your repertoire or training data.
-        </div>
-        <div className="board-preference-group">
-          <strong>Appearance</strong>
-          <div className="segmented">
-            {APP_THEME_OPTIONS.map(theme => (
-              <button
-                key={theme.key}
-                className={boardPreferences.appTheme === theme.key ? 'active' : ''}
-                onClick={() => void updatePreferences({ appTheme: theme.key as AppThemeKey })}
-              >
-                {theme.name}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="board-preference-group">
-          <strong>Board color</strong>
-          <div className="board-theme-grid">
-            {BOARD_THEME_OPTIONS.map(theme => (
-              <button
-                key={theme.key}
-                className={'board-theme-choice' + (boardPreferences.boardTheme === theme.key ? ' active' : '')}
-                onClick={() => void updatePreferences({ boardTheme: theme.key as BoardThemeKey })}
-              >
-                <span className="board-theme-swatch" style={{ background: `linear-gradient(135deg, ${theme.light} 0 50%, ${theme.dark} 50% 100%)` }} />
-                <span>{theme.name}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="board-preference-group">
-          <strong>Pieces</strong>
-          <div className="segmented">
-            {PIECE_SET_OPTIONS.map(pieceSet => (
-              <button
-                key={pieceSet.key}
-                className={boardPreferences.pieceSet === pieceSet.key ? 'active' : ''}
-                onClick={() => void updatePreferences({ pieceSet: pieceSet.key as PieceSetKey })}
-              >
-                {pieceSet.name}
-              </button>
-            ))}
-          </div>
-        </div>
-        <label className="board-preference-check">
-          <input
-            type="checkbox"
-            checked={boardPreferences.animationsEnabled}
-            onChange={e => void updatePreferences({ animationsEnabled: e.target.checked })}
-          />
-          <span>Animate piece movement</span>
-        </label>
-        <div className="board-preference-speed">
-          <label htmlFor="animation-speed">Animation speed</label>
-          <input
-            id="animation-speed"
-            type="range"
-            min={MIN_ANIMATION_MS}
-            max={MAX_ANIMATION_MS}
-            step={10}
-            value={animationSpeedSliderValue}
-            disabled={!boardPreferences.animationsEnabled}
-            onChange={e => void updatePreferences({ animationSpeedMs: MAX_ANIMATION_MS + MIN_ANIMATION_MS - Number(e.target.value) })}
-          />
-          <span className="mono small">{boardPreferences.animationSpeedMs}ms</span>
-        </div>
-        <label className="board-preference-check">
-          <input
-            type="checkbox"
-            checked={boardPreferences.soundEnabled}
-            onChange={e => void updatePreferences({ soundEnabled: e.target.checked })}
-          />
-          <span>Move sound</span>
-        </label>
-        <label className="board-preference-check">
-          <input
-            type="checkbox"
-            checked={boardPreferences.hideDragGhost}
-            onChange={e => void updatePreferences({ hideDragGhost: e.target.checked })}
-          />
-          <span>Use origin-square highlight while dragging</span>
-        </label>
-      </div>
-
-      <div className="panel training-preferences-panel">
-        <h3>Training sessions</h3>
-        <div className="settings-copy muted small">
-          Set how much new prep Chesski introduces and how many review cards a session serves up.
-        </div>
-        <div className="training-preference-row">
-          <label htmlFor="learn-line-depth">
-            <strong>New line depth</strong>
-            <span className="muted small">Your moves per Learn line</span>
-          </label>
-          <input
-            id="learn-line-depth"
-            type="range"
-            min={3}
-            max={8}
-            step={1}
-            value={trainingPreferences.learnLineDepth}
-            onChange={e => void updateTrainingPreferences({ learnLineDepth: Number(e.target.value) })}
-          />
-          <span className="mono small">{trainingPreferences.learnLineDepth}</span>
-        </div>
-        <div className="training-preference-row">
-          <label htmlFor="review-session-length">
-            <strong>Review length</strong>
-            <span className="muted small">Cards per Review session</span>
-          </label>
-          <input
-            id="review-session-length"
-            type="range"
-            min={5}
-            max={30}
-            step={1}
-            value={trainingPreferences.reviewSessionLength}
-            onChange={e => void updateTrainingPreferences({ reviewSessionLength: Number(e.target.value) })}
-          />
-          <span className="mono small">{trainingPreferences.reviewSessionLength}</span>
+          <div className="eyebrow">Settings</div>
+          <h1>Study controls</h1>
+          <p>Board feel, training cadence, and source defaults. Quiet knobs, sharp prep.</p>
         </div>
       </div>
 
-      <div className="panel">
-        <h3>Opening choices</h3>
-        <div className="muted small settings-copy">
-          Drag sources into the order you want Chesski to check. Imported PGNs show up here as your own player-book source. Player moves need a positive record and then pass the quality guard below.
-        </div>
-        <div className="settings-pack-grid">
-          {RECOMMENDATION_PACKS.map(pack => (
-            <button key={pack.key} className="settings-pack-card" onClick={() => void applyPack(pack.sources)}>
-              <strong>{pack.name}</strong>
-              <span>{pack.description}</span>
-            </button>
-          ))}
-        </div>
-        <div className="settings-drop-grid">
-          <div
-            className="settings-drop-column"
-            onDragOver={e => e.preventDefault()}
-            onDrop={e => dropIntoActive(e)}
-          >
-            <h4>Use first</h4>
-            <div className="settings-player-list">
-              {activeSources.length > 0 ? activeSources.map((source, index) => (
-                <div
-                  key={source.key}
-                  className="settings-player-row"
-                  draggable
-                  onDragStart={e => startDrag(e, source.key)}
-                  onDragOver={e => e.preventDefault()}
-                  onDrop={e => dropIntoActive(e, index)}
-                >
-                  <span className="settings-drag-grip" aria-hidden="true">::</span>
-                  <span className="settings-player-rank">{index + 1}</span>
-                  <span className="settings-player-name">{labelForSource(source)}</span>
-                </div>
-              )) : (
-                <div className="settings-empty-drop">Drop sources here</div>
-              )}
-              <div className="settings-fallback-stack">
-                <div className="settings-fallback-row stockfish">Stockfish</div>
+      <div className="settings-columns">
+        <div className="settings-col">
+          <div className="panel algorithm-guide-panel">
+            <img src="/chesski-256.png" alt="" className="algorithm-guide-sprite" />
+            <div>
+              <h3>Algorithm guide</h3>
+              <div className="muted small settings-copy">
+                A quick click-through tour of source order, move selection, and the player-line quality guard.
               </div>
             </div>
+            <button onClick={() => { setGuideStep(0); setGuideOpen(true); }}>Guide me</button>
           </div>
-          <div
-            className="settings-drop-column inactive"
-            onDragOver={e => e.preventDefault()}
-            onDrop={dropIntoInactive}
-          >
-            <h4>Don't use</h4>
-            <div className="settings-player-list">
-              {inactiveSources.length > 0 ? inactiveSources.map(source => (
-                <div
-                  key={source.key}
-                  className="settings-player-row inactive"
-                  draggable
-                  onDragStart={e => startDrag(e, source.key)}
-                >
-                  <span className="settings-drag-grip" aria-hidden="true">::</span>
-                  <span className="settings-player-name">{labelForSource(source)}</span>
+
+          <div className="panel algorithm-guide-panel">
+            <img src="/chesski-256.png" alt="" className="algorithm-guide-sprite" />
+            <div>
+              <h3>How Chesski works</h3>
+              <div className="muted small settings-copy">
+                Reference page for the parts of Chesski that aren't obvious. Currently covers the
+                spaced-repetition system; will grow.
+              </div>
+            </div>
+            <button onClick={() => setHelpDocsOpen(true)}>Open help &amp; docs</button>
+          </div>
+
+          <div className="panel board-preferences-panel">
+            <h3>Board and pieces</h3>
+            <div className="settings-copy muted small">
+              Tune the board without changing your repertoire or training data.
+            </div>
+            <div className="board-preference-group">
+              <strong>Appearance</strong>
+              <div className="segmented">
+                {APP_THEME_OPTIONS.map(theme => (
+                  <button
+                    key={theme.key}
+                    className={boardPreferences.appTheme === theme.key ? 'active' : ''}
+                    onClick={() => void updatePreferences({ appTheme: theme.key as AppThemeKey })}
+                  >
+                    {theme.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="board-preference-group">
+              <strong>Accent color</strong>
+              <div className="accent-color-grid">
+                {ACCENT_COLOR_OPTIONS.map(option => (
+                  <button
+                    key={option.key}
+                    className={'accent-color-choice' + (boardPreferences.accentColor === option.key ? ' active' : '')}
+                    title={option.name}
+                    onClick={() => void updatePreferences({ accentColor: option.key as AccentColorKey })}
+                  >
+                    <span className="accent-color-swatch" style={{ background: option.swatch }} />
+                    <span className="accent-color-label">{option.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="board-preference-group">
+              <strong>Board color</strong>
+              <div className="board-theme-grid">
+                {BOARD_THEME_OPTIONS.map(theme => (
+                  <button
+                    key={theme.key}
+                    className={'board-theme-choice' + (boardPreferences.boardTheme === theme.key ? ' active' : '')}
+                    onClick={() => void updatePreferences({ boardTheme: theme.key as BoardThemeKey })}
+                  >
+                    <span className="board-theme-swatch" style={{ background: `linear-gradient(135deg, ${theme.light} 0 50%, ${theme.dark} 50% 100%)` }} />
+                    <span>{theme.name}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="board-preference-group">
+              <strong>Pieces</strong>
+              <div className="segmented">
+                {PIECE_SET_OPTIONS.map(pieceSet => (
+                  <button
+                    key={pieceSet.key}
+                    className={boardPreferences.pieceSet === pieceSet.key ? 'active' : ''}
+                    onClick={() => void updatePreferences({ pieceSet: pieceSet.key as PieceSetKey })}
+                  >
+                    {pieceSet.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <label className="board-preference-check">
+              <input
+                type="checkbox"
+                checked={boardPreferences.animationsEnabled}
+                onChange={e => void updatePreferences({ animationsEnabled: e.target.checked })}
+              />
+              <span>Animate piece movement</span>
+            </label>
+            <div className="board-preference-speed">
+              <label htmlFor="animation-speed">Animation speed</label>
+              <input
+                id="animation-speed"
+                type="range"
+                min={MIN_ANIMATION_MS}
+                max={MAX_ANIMATION_MS}
+                step={10}
+                value={animationSpeedSliderValue}
+                disabled={!boardPreferences.animationsEnabled}
+                onChange={e => void updatePreferences({ animationSpeedMs: MAX_ANIMATION_MS + MIN_ANIMATION_MS - Number(e.target.value) })}
+              />
+              <span className="mono small">{boardPreferences.animationSpeedMs}ms</span>
+            </div>
+            <label className="board-preference-check">
+              <input
+                type="checkbox"
+                checked={boardPreferences.soundEnabled}
+                onChange={e => void updatePreferences({ soundEnabled: e.target.checked })}
+              />
+              <span>Move sound</span>
+            </label>
+            <label className="board-preference-check">
+              <input
+                type="checkbox"
+                checked={boardPreferences.hideDragGhost}
+                onChange={e => void updatePreferences({ hideDragGhost: e.target.checked })}
+              />
+              <span>Use origin-square highlight while dragging</span>
+            </label>
+          </div>
+
+          <div className="panel">
+            <h3>Algorithm defaults</h3>
+            <div className="muted small settings-copy">
+              Global source order is the fallback for every repertoire and opening folder. Repertoire and opening-specific Algorithm buttons can override it.
+            </div>
+            <button className="primary" onClick={onOpenGlobalAlgorithm}>Open global Algorithm</button>
+          </div>
+
+          <div className="panel">
+            <h3>Add your games</h3>
+            <div className="muted small settings-copy">
+              Import a PGN file and enter the player name as it appears in those games. Chesski will add those moves to the ranked list above, just like Magnus, Morphy, or anyone else.
+            </div>
+            <div className="row settings-import-row">
+              <input
+                value={importName}
+                onChange={e => setImportName(e.target.value)}
+                placeholder="Player name in PGN"
+              />
+              <button onClick={() => fileInputRef.current?.click()} disabled={importing || !importName.trim()}>
+                {importing ? 'Importing...' : 'Import PGN'}
+              </button>
+              <button onClick={handleClearUserBook} disabled={importing}>Clear imported</button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pgn,.txt"
+                onChange={handleImportFile}
+                style={{ display: 'none' }}
+              />
+            </div>
+            {importStatus && <div className="small account-status good">{importStatus}</div>}
+          </div>
+        </div>
+
+        <div className="settings-col">
+          <div className="panel">
+            <h3>Onboarding</h3>
+            <div className="muted small settings-copy">
+              Reopen the first-run guide for choosing a side, adding an opening, setting source preferences, and starting training.
+            </div>
+            <button onClick={() => void onRestartOnboarding()}>Restart onboarding</button>
+          </div>
+
+          <div className="panel training-preferences-panel">
+            <h3>Training sessions</h3>
+            <div className="settings-copy muted small">
+              Set how much new prep Chesski introduces and how many review cards a session serves up.
+            </div>
+            <div className="training-preference-row">
+              <label htmlFor="learn-line-depth">
+                <strong>New line depth</strong>
+                <span className="muted small">Your moves per Learn line</span>
+              </label>
+              <input
+                id="learn-line-depth"
+                type="range"
+                min={3}
+                max={8}
+                step={1}
+                value={trainingPreferences.learnLineDepth}
+                onChange={e => void updateTrainingPreferences({ learnLineDepth: Number(e.target.value) })}
+              />
+              <span className="mono small">{trainingPreferences.learnLineDepth}</span>
+            </div>
+            <div className="training-preference-row">
+              <label htmlFor="review-session-length">
+                <strong>Review length</strong>
+                <span className="muted small">Cards per Review session</span>
+              </label>
+              <input
+                id="review-session-length"
+                type="range"
+                min={5}
+                max={30}
+                step={1}
+                value={trainingPreferences.reviewSessionLength}
+                onChange={e => void updateTrainingPreferences({ reviewSessionLength: Number(e.target.value) })}
+              />
+              <span className="mono small">{trainingPreferences.reviewSessionLength}</span>
+            </div>
+            <div className="training-preference-row">
+              <label htmlFor="line-aware-review">
+                <strong>Line-aware review</strong>
+                <span className="muted small">Auto-play context moves, prompt only on due cards (Chessable-style). Turn off to revert to flat one-card-at-a-time review.</span>
+              </label>
+              <input
+                id="line-aware-review"
+                type="checkbox"
+                checked={trainingPreferences.useLineAwareReview}
+                onChange={e => void updateTrainingPreferences({ useLineAwareReview: e.target.checked })}
+              />
+            </div>
+            <div className="training-preference-row">
+              <label htmlFor="review-line-playback-speed">
+                <strong>Review line playback speed</strong>
+                <span className="muted small">How quickly context moves auto-play between due cards</span>
+              </label>
+              <div className="preference-range-with-labels">
+                <input
+                  id="review-line-playback-speed"
+                  type="range"
+                  min={MIN_REVIEW_LINE_PLAYBACK_DELAY_MS}
+                  max={MAX_REVIEW_LINE_PLAYBACK_DELAY_MS}
+                  step={10}
+                  value={reviewLinePlaybackSliderValue}
+                  onChange={e => void updateTrainingPreferences({
+                    reviewLinePlaybackDelayMs:
+                      MAX_REVIEW_LINE_PLAYBACK_DELAY_MS + MIN_REVIEW_LINE_PLAYBACK_DELAY_MS - Number(e.target.value),
+                  })}
+                />
+                <div className="range-label-row">
+                  <span>Slower</span>
+                  <span>Faster</span>
                 </div>
-              )) : (
-                <div className="settings-empty-drop">Drop sources here to turn them off</div>
-              )}
+              </div>
+              <span className="mono small">{trainingPreferences.reviewLinePlaybackDelayMs}ms</span>
             </div>
           </div>
-        </div>
-        <div className="settings-threshold-row">
-          <div>
-            <strong>Player-line quality guard</strong>
-            <div className="muted small">Applies only to newly generated player-book lines.</div>
-          </div>
-          <select
-            value={settings.playerBookMaxCpLoss}
-            onChange={e => void setPlayerBookMaxCpLoss(Number(e.target.value))}
-          >
-            <option value={50}>Strict: 50 cp</option>
-            <option value={75}>Balanced: 75 cp</option>
-            <option value={100}>Faithful: 100 cp</option>
-            <option value={150}>Loose: 150 cp</option>
-          </select>
+
         </div>
       </div>
 
-      <div className="panel">
-        <h3>Add your games</h3>
-        <div className="muted small settings-copy">
-          Import a PGN file and enter the player name as it appears in those games. Chesski will add those moves to the ranked list above, just like Magnus, Morphy, or anyone else.
-        </div>
-        <div className="row settings-import-row">
-          <input
-            value={importName}
-            onChange={e => setImportName(e.target.value)}
-            placeholder="Player name in PGN"
-          />
-          <button onClick={() => fileInputRef.current?.click()} disabled={importing || !importName.trim()}>
-            {importing ? 'Importing...' : 'Import PGN'}
-          </button>
-          <button onClick={handleClearUserBook} disabled={importing}>Clear imported</button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pgn,.txt"
-            onChange={handleImportFile}
-            style={{ display: 'none' }}
-          />
-        </div>
-        {importStatus && <div className="small account-status good">{importStatus}</div>}
-      </div>
-
-      <div className="panel">
-        <h3>Player book</h3>
-        {bookStats.length > 0 ? (
-          <div className="settings-book-list">
-            {bookStats.map(player => (
-              <div key={player.key} className="settings-book-row">
-                <strong>{player.name}</strong>
-                <span className="muted small">{player.indexedGames.toLocaleString()} games</span>
-                <span className="muted small">{player.positions.toLocaleString()} positive positions</span>
-              </div>
-            ))}
-          </div>
-        ) : error ? (
-          <div className="small" style={{ color: 'var(--bad)' }}>{error}</div>
-        ) : (
-          <div className="muted">Loading player books...</div>
-        )}
-      </div>
+      <details className="settings-wide-section collapsible">
+        <summary><strong>Trivia</strong> <span className="muted small">— Practice chess history cards and manage trivia progress.</span></summary>
+        <HistoryMode onProgressChange={onTriviaProgressChange} />
+      </details>
     </div>
   );
 }

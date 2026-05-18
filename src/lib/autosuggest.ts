@@ -1,12 +1,16 @@
-import type { Color, Edge, FrontierCandidate, FrontierSource, NormFen, Repertoire } from '../types';
+import type { Color, Edge, FrontierCandidate, FrontierSource, NormFen, ReadyLine, Repertoire } from '../types';
 import { frontierId } from '../types';
-import { applyMove, chessFromFen, turnAt } from './chess';
+import { applyMove, chessFromFen, STARTING_FEN_NORM, turnAt } from './chess';
 import { fetchCloudEval, fetchExplorer, LichessAuthError, type CloudEvalResponse, type LichessExplorerResponse, type LichessMove } from './lichess';
 import {
+  addMovesToRepertoire,
   clearFrontiersForRepertoire,
+  countReadyLines,
   getEdge,
+  getEdgeById,
   getEdgesForRepertoire,
   getEdgesFromParent,
+  getFrontiersForRepertoire,
   getOpenFrontiers,
   markFrontierAnswered,
   markFrontiersAnsweredByChildFen,
@@ -14,6 +18,8 @@ import {
   playMoveInRepertoire,
   putEdge,
   putFrontiers,
+  restoreGenerationState,
+  snapshotGenerationState,
 } from './storage';
 import { getPlayerBookMoves, type PlayerBookPick, type PlayerBookSourceLine } from './playerBook';
 import { getEnabledRecommendationOrder, getRecommendationSettings, type DatabaseSourceKey, type PlayerKey } from './recommendationSettings';
@@ -27,7 +33,35 @@ export const TUNING = {
   yourMoveBeta: 0.5,  // win-rate weight
   mistakeThresholdPawn: 1.5,
   cloudEvalMultiPv: 5,
+  // Stockfish depth used during line construction (per-move filter, ranking, opponent picks).
+  engineDepthLineGen: 18,
+  // Stockfish depth used for the post-generation quality gate (start + end FEN only).
+  // Keep this aligned with line generation so the gate does not veto depth-18 choices
+  // with a stricter, semantically different search.
+  engineDepthGate: 18,
+  // Stockfish depth used by the training UI's live eval panel ("Current" / "Line end").
+  // Kept shallower than the gate so the panel populates in a few seconds, not 15+.
+  engineDepthDisplay: 14,
+  // Stockfish depth used when picking user moves via the engine fallback (no player-book
+  // hit). Deeper than engineDepthLineGen because this is a one-shot best-move pick — no
+  // rollout, no multi-pass. A previous multi-PV + 5-move rollout approach got fooled by
+  // its own optimistic simulation (e.g., picking Be3 over Qxd4 because the rollout's
+  // assumed Black replies were unrealistically weak — see docs/line-selection.md "Engine
+  // rollout picker hazards"). Direct depth-22 best-move pick is simpler and avoids that
+  // class of bug entirely.
+  engineDepthSelect: 22,
+  // Build worker fills the per-scope ready-line cache up to this many lines.
+  readyLineCap: 3,
+  qualityGateMaxAttempts: 3,
+  qualityGateTimeoutMs: 120_000,
   maxFrontierPlies: 32,
+  // Historical name kept for compatibility with old docs. The frontier index is
+  // no longer capped by this value; readyLineCap controls the small generated-line cache.
+  frontierQueueTarget: 3,
+  maxFrontierRebuildNodes: 180,
+  maxFrontierFallbackNodes: 32,
+  maxFrontierExplorerCalls: 60,
+  maxFrontierFallbackExplorerCalls: 10,
   prepMinGamesPerBranch: 100,
   prepOpponentPopularityFraction: 0.08,
   prepMaxOpponentBranches: 5,
@@ -41,6 +75,16 @@ function traceStep(trace: GenerationTrace | undefined, message: string): void {
 
 function describeError(e: unknown): string {
   return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+}
+
+class FrontierGenerationError extends Error {
+  frontierId?: string;
+
+  constructor(message: string, frontierId?: string) {
+    super(message);
+    this.name = 'FrontierGenerationError';
+    this.frontierId = frontierId;
+  }
 }
 
 // ---------- Pick YOUR move ----------
@@ -71,6 +115,12 @@ interface MovePop {
   draws: number;
 }
 
+interface DirectMoveOptions {
+  playerBookOnly?: boolean;
+  skipPlayerBook?: boolean;
+  skipEngineFallback?: boolean;
+}
+
 function moveToPop(m: LichessMove, color: Color): MovePop {
   const yourWins = color === 'w' ? m.white : m.black;
   return { san: m.san, uci: m.uci, total: m.white + m.draws + m.black, yourWins, draws: m.draws };
@@ -80,12 +130,25 @@ function moveToPop(m: LichessMove, color: Color): MovePop {
 // Database candidates are filtered to moves within evalThresholdPawn of the engine's best,
 // then ranked by alpha*popularity + beta*winrate.
 export async function pickYourMove(fen: NormFen, color: Color, signal?: AbortSignal, trace?: GenerationTrace): Promise<YourMovePick | null> {
+  const playerBookPick = await pickYourMoveDirect(fen, color, signal, trace, { playerBookOnly: true });
+  if (playerBookPick) return playerBookPick;
+
+  return pickYourMoveDirect(fen, color, signal, trace, { skipPlayerBook: true });
+}
+
+async function pickYourMoveDirect(
+  fen: NormFen,
+  color: Color,
+  signal?: AbortSignal,
+  trace?: GenerationTrace,
+  options: DirectMoveOptions = {}
+): Promise<YourMovePick | null> {
   const settings = await getRecommendationSettings();
   let enginePromise: Promise<CloudEvalResponse | null> | null = null;
   const getEngine = () => {
     if (!enginePromise) {
-      traceStep(trace, `Your move picker: requesting engine eval at ${fen}.`);
-      enginePromise = fetchCloudEval(fen, TUNING.cloudEvalMultiPv, signal).then(engine => {
+      traceStep(trace, `Your move picker: requesting engine eval at depth ${TUNING.engineDepthSelect}, fen=${fen}.`);
+      enginePromise = fetchCloudEval(fen, TUNING.cloudEvalMultiPv, TUNING.engineDepthSelect, signal).then(engine => {
         traceStep(trace, engine
           ? `Your move picker: engine returned ${engine.pvs.length} PVs at depth ${engine.depth ?? 'unknown'}.`
           : 'Your move picker: engine returned no eval.');
@@ -99,6 +162,7 @@ export async function pickYourMove(fen: NormFen, color: Color, signal?: AbortSig
   traceStep(trace, `Your move picker: enabled sources=${orderedSources.map(source => source.kind === 'player-book' ? `player-book:${source.key}` : source.key).join(', ') || 'none'}.`);
   for (const source of orderedSources) {
     if (source.kind === 'player-book') {
+      if (options.skipPlayerBook) continue;
       traceStep(trace, `Your move picker: trying player book ${source.key}.`);
       const playerPick = await pickEngineSafePlayerBookMove(
         source.key,
@@ -114,6 +178,7 @@ export async function pickYourMove(fen: NormFen, color: Color, signal?: AbortSig
       }
       traceStep(trace, `Your move picker: player book ${source.key} had no usable move.`);
     } else {
+      if (options.playerBookOnly) continue;
       const databasePick = await pickDatabaseMove(source.key, fen, color, getEngine, signal, trace);
       if (databasePick) {
         traceStep(trace, `Your move picker: database ${source.key} selected ${databasePick.san} (${databasePick.uci}).`);
@@ -121,6 +186,16 @@ export async function pickYourMove(fen: NormFen, color: Color, signal?: AbortSig
       }
       traceStep(trace, `Your move picker: database ${source.key} had no usable move.`);
     }
+  }
+
+  if (options.playerBookOnly) {
+    traceStep(trace, 'Your move picker: no engine-safe player-book move found.');
+    return null;
+  }
+
+  if (options.skipEngineFallback) {
+    traceStep(trace, 'Your move picker: direct engine fallback skipped for rollout simulation.');
+    return null;
   }
 
   const engine = await getEngine();
@@ -264,7 +339,7 @@ async function candidateCpLoss(
   }
   const attempted = applyMove(fen, uciToObj(uci));
   if (!attempted) return null;
-  const post = await fetchCloudEval(attempted.fen, 1, signal);
+  const post = await fetchCloudEval(attempted.fen, 1, TUNING.engineDepthLineGen, signal);
   if (!post || post.pvs.length === 0) return null;
   const postCp = pvCpForColor(post.pvs[0], color);
   return postCp === null ? null : bestCp - postCp;
@@ -351,7 +426,7 @@ export interface MoveEvaluation {
 }
 
 export async function evaluateMoveCpLoss(fen: NormFen, attemptedUci: string, signal?: AbortSignal): Promise<MoveEvaluation> {
-  const engine = await fetchCloudEval(fen, TUNING.cloudEvalMultiPv, signal);
+  const engine = await fetchCloudEval(fen, TUNING.cloudEvalMultiPv, TUNING.engineDepthLineGen, signal);
   const attempted = applyMove(fen, uciToObj(attemptedUci));
   const attemptedSan = attempted?.san ?? null;
   if (!engine || engine.pvs.length === 0) return { cpLoss: null, best: null, attemptedSan };
@@ -370,11 +445,99 @@ export async function evaluateMoveCpLoss(fen: NormFen, attemptedUci: string, sig
     return { cpLoss: bestCp - cp, best, attemptedSan };
   }
   if (!attempted) return { cpLoss: null, best, attemptedSan };
-  const post = await fetchCloudEval(attempted.fen, 1, signal);
+  const post = await fetchCloudEval(attempted.fen, 1, TUNING.engineDepthLineGen, signal);
   if (!post || post.pvs.length === 0) return { cpLoss: null, best, attemptedSan };
   const postCp = pvCpForColor(post.pvs[0], mover);
   if (postCp === null) return { cpLoss: null, best, attemptedSan };
   return { cpLoss: bestCp - postCp, best, attemptedSan };
+}
+
+// ---------- Line-quality gate ----------
+
+// Tiered max-allowed eval drop based on the line's starting eval (in pawns, from the
+// user's color). Negative starting evals (user is already worse) are treated as 0 to
+// apply the strictest threshold — we don't want a worse-off line to bleed further.
+export function maxAllowedDropPawns(startPawns: number): number {
+  const bucket = Math.max(0, startPawns);
+  if (bucket <= 1) return 0.5;
+  if (bucket <= 3) return 0.75;
+  if (bucket <= 4) return 1.0;
+  if (bucket <= 5) return 2.0;
+  return 3.0;
+}
+
+export interface LineQualityResult {
+  passed: boolean;
+  startCp: number | null;
+  endCp: number | null;
+  dropCp: number | null;
+  thresholdCp: number;
+  reason: string;
+  mateLost: boolean;
+}
+
+function isWinningMate(cp: number | null): boolean {
+  return cp !== null && cp > 90000;
+}
+
+// Re-evaluate the start and end positions of a generated line at TUNING.engineDepthGate
+// and decide whether the line passed the quality gate.
+//
+// Pass conditions (in order):
+//  1. If start is a winning mate and end is not → FAIL (mate lost).
+//  2. If either eval is unavailable → SKIP (treated as pass; can't judge what we can't measure).
+//  3. If (startCp - endCp) > thresholdFromMaxAllowedDropPawns(startCp) → FAIL.
+//  4. Otherwise → PASS.
+//
+// Every decision is written to the GenerationTrace so it appears in the train UI's
+// trace panel and the copy-paste log.
+export async function evaluateLineQuality(
+  startFen: NormFen,
+  endFen: NormFen,
+  color: Color,
+  signal?: AbortSignal,
+  trace?: GenerationTrace
+): Promise<LineQualityResult> {
+  if (startFen === endFen) {
+    const r: LineQualityResult = { passed: true, startCp: null, endCp: null, dropCp: null,
+      thresholdCp: 0, reason: 'Start and end FEN identical; gate trivially passes', mateLost: false };
+    traceStep(trace, `Quality gate: SKIP — ${r.reason}.`);
+    return r;
+  }
+  traceStep(trace, `Quality gate: deep-eval start=${startFen} and end=${endFen} at depth ${TUNING.engineDepthGate}.`);
+  const [startEval, endEval] = await Promise.all([
+    fetchCloudEval(startFen, 1, TUNING.engineDepthGate, signal),
+    fetchCloudEval(endFen,   1, TUNING.engineDepthGate, signal),
+  ]);
+  const startCp = startEval && startEval.pvs[0] ? pvCpForColor(startEval.pvs[0], color) : null;
+  const endCp   = endEval   && endEval.pvs[0]   ? pvCpForColor(endEval.pvs[0],   color) : null;
+
+  const startWinMate = isWinningMate(startCp);
+  const endWinMate   = isWinningMate(endCp);
+  if (startWinMate && !endWinMate) {
+    const r: LineQualityResult = { passed: false, startCp, endCp, dropCp: null,
+      thresholdCp: 0, reason: `Lost a winning mate (startCp=${startCp}, endCp=${endCp})`, mateLost: true };
+    traceStep(trace, `Quality gate: FAIL — ${r.reason}.`);
+    return r;
+  }
+  if (startCp === null || endCp === null) {
+    const r: LineQualityResult = { passed: true, startCp, endCp, dropCp: null,
+      thresholdCp: 0, reason: `No engine eval available (startCp=${startCp}, endCp=${endCp}); gate skipped`, mateLost: false };
+    traceStep(trace, `Quality gate: SKIP — ${r.reason}.`);
+    return r;
+  }
+  const startPawns = startCp / 100;
+  const thresholdPawns = maxAllowedDropPawns(startPawns);
+  const thresholdCp = thresholdPawns * 100;
+  const dropCp = startCp - endCp;
+  const dropPawns = dropCp / 100;
+  const passed = dropCp <= thresholdCp;
+  const reason = passed
+    ? `Drop ${dropPawns.toFixed(2)} <= threshold ${thresholdPawns.toFixed(2)} (start ${startPawns.toFixed(2)} -> end ${(endCp / 100).toFixed(2)})`
+    : `Drop ${dropPawns.toFixed(2)} > threshold ${thresholdPawns.toFixed(2)} (start ${startPawns.toFixed(2)} -> end ${(endCp / 100).toFixed(2)})`;
+  const r: LineQualityResult = { passed, startCp, endCp, dropCp, thresholdCp, reason, mateLost: false };
+  traceStep(trace, `Quality gate: ${passed ? 'PASS' : 'FAIL'} — ${reason}.`);
+  return r;
 }
 
 // ---------- Pick OPPONENT moves to enumerate ----------
@@ -513,6 +676,7 @@ export async function savePrepStopFrontier(
 }
 
 export async function pickOpponentMoves(fen: NormFen, signal?: AbortSignal, trace?: GenerationTrace): Promise<OpponentMove[]> {
+  const depth = TUNING.engineDepthLineGen;
   let resp: LichessExplorerResponse;
   traceStep(trace, `Opponent move picker: querying Lichess Explorer at ${fen}`);
   try {
@@ -523,22 +687,22 @@ export async function pickOpponentMoves(fen: NormFen, signal?: AbortSignal, trac
       throw e;
     }
     traceStep(trace, `Opponent move picker: Explorer failed, falling back to Stockfish: ${describeError(e)}`);
-    return opponentMovesFromStockfish(fen, signal, trace);
+    return opponentMovesFromStockfish(fen, signal, trace, depth);
   }
   const total = resp.white + resp.draws + resp.black;
   traceStep(trace, `Opponent move picker: Explorer total games=${total}, candidate moves=${resp.moves.length}`);
   if (total === 0) {
     traceStep(trace, 'Opponent move picker: Explorer has zero games, falling back to Stockfish.');
-    return opponentMovesFromStockfish(fen, signal, trace);
+    return opponentMovesFromStockfish(fen, signal, trace, depth);
   }
 
-  const engine = await fetchCloudEval(fen, TUNING.cloudEvalMultiPv, signal);
+  const engine = await fetchCloudEval(fen, TUNING.cloudEvalMultiPv, depth, signal);
   return opponentMovesFromExplorer(fen, resp, total, engine, trace);
 }
 
-async function opponentMovesFromStockfish(fen: NormFen, signal?: AbortSignal, trace?: GenerationTrace): Promise<OpponentMove[]> {
+async function opponentMovesFromStockfish(fen: NormFen, signal?: AbortSignal, trace?: GenerationTrace, depth: number = TUNING.engineDepthLineGen): Promise<OpponentMove[]> {
   traceStep(trace, `Stockfish fallback: requesting ${TUNING.cloudEvalMultiPv} PVs at ${fen}`);
-  const engine = await fetchCloudEval(fen, TUNING.cloudEvalMultiPv, signal);
+  const engine = await fetchCloudEval(fen, TUNING.cloudEvalMultiPv, depth, signal);
   if (!engine || engine.pvs.length === 0) {
     traceStep(trace, 'Stockfish fallback: no engine PVs returned.');
     return [];
@@ -624,6 +788,9 @@ export interface FrontierResult {
   // The path of edges/moves leading to this frontier. Each step is either a stored edge or a
   // proposed implicit opponent move (still represented as SAN/UCI but `edgeId` is null).
   path: PathStep[];
+  // Diagnostic only: which branch of findTopFrontier produced this result.
+  // Surfaced in the UI's "Selection details" panel; never used for selection.
+  reason?: 'frontier-index' | 'fallback-search';
 }
 
 export interface PathStep {
@@ -637,6 +804,97 @@ export interface PathStep {
   source?: FrontierSource;
 }
 
+interface FrontierScope {
+  key: string;
+  openingKey: string | null;
+  openingName: string | null;
+  rootFen: NormFen;
+  startFen: NormFen;
+}
+
+interface FrontierSearchLimits {
+  clearFirst: boolean;
+  maxNodes: number;
+  maxExplorerCalls: number;
+  stopAfterFrontiers?: number;
+  reason: string;
+}
+
+function rootScope(rep: Repertoire): FrontierScope {
+  return {
+    key: 'root',
+    openingKey: null,
+    openingName: null,
+    rootFen: rep.rootFen,
+    startFen: rep.rootFen,
+  };
+}
+
+function scopeFromStart(rep: Repertoire, openingScope: GenerationOpeningScope | null, start: GenerationStart): FrontierScope {
+  if (!openingScope) return rootScope(rep);
+  return {
+    key: `${rep.color}:${openingScope.key}:${rep.rootFen}:${start.startFen}`,
+    openingKey: openingScope.key,
+    openingName: openingScope.name,
+    rootFen: rep.rootFen,
+    startFen: start.startFen,
+  };
+}
+
+// Public helper: compute the same scope key that scopeFromStart would, given just the
+// inputs the UI has on hand (no async DB walk needed). Used by the ready-line cache so
+// that build/lookup keys stay in sync with the generator's internal scoping.
+export function computeScopeKey(rep: Repertoire, openingScope: GenerationOpeningScope | null): string | null {
+  if (!openingScope) return 'root';
+  let startFen: NormFen = STARTING_FEN_NORM;
+  for (const move of openingScope.moves) {
+    const r = applyMove(startFen, move);
+    if (!r) return null; // invalid opening definition; caller should treat as no scope
+    startFen = r.fen;
+  }
+  return `${rep.color}:${openingScope.key}:${rep.rootFen}:${startFen}`;
+}
+
+function scopedFrontierId(rep: Repertoire, frontier: Pick<DiscoveredFrontier, 'parentFen' | 'uci'>, scope: FrontierScope): string {
+  return `${scope.key}::${frontierId(rep.id, frontier.parentFen, frontier.uci)}`;
+}
+
+// A frontier is in scope iff:
+//   1. its persisted scopeKey matches the active scope's key, AND
+//   2. its position is at-or-downstream-of scope.startFen.
+//
+// Condition (2) catches a class of bugs where ancestor frontiers (positions on
+// the path leading TO scope.startFen) were stamped with the scope's key at
+// discovery time and then surfaced as candidates by selection. Example: with
+// scope = Italian Game (startFen = post-3.Bc4), the frontier "Nc6 (b8c6)" sits
+// at the position after 2...Nc6 — one ply BEFORE 3.Bc4 was played. Selecting it
+// would extend the line from a position upstream of the Italian, freeing the
+// engine to pick Bb5 (Ruy Lopez) instead of Bc4 (Italian). The scope-leak
+// assertion at line-creation time catches and rejects this, but the cleaner fix
+// is to never offer the candidate in the first place.
+//
+// "At-or-downstream-of scope.startFen" means scope.startFen appears somewhere in
+// the chain rep.rootFen → frontier.parentFen (i.e., as a step.toFen in the
+// frontier's path), or the frontier's parentFen IS scope.startFen (an OTM-F
+// representing an unanswered immediate reply at the scope endpoint). When the
+// scope is the root (no opening filter), startFen === rootFen and every
+// frontier passes by definition.
+function frontierInScope(frontier: FrontierCandidate, scope: FrontierScope): boolean {
+  if ((frontier.scopeKey ?? 'root') !== scope.key) return false;
+  if (scope.startFen === scope.rootFen) return true;
+  if (frontier.parentFen === scope.startFen) return true;
+  return frontier.path.some(step => step.toFen === scope.startFen);
+}
+
+function frontierStatusCounts(frontiers: FrontierCandidate[]): Record<'open' | 'answered' | 'blocked' | 'stale', number> {
+  return {
+    open: frontiers.filter(frontier => frontier.status === 'open').length,
+    answered: frontiers.filter(frontier => frontier.status === 'answered').length,
+    blocked: frontiers.filter(frontier => frontier.status === 'blocked').length,
+    stale: frontiers.filter(frontier => frontier.status === 'stale').length,
+  };
+}
+
 // Three-phase algorithm:
 //   Phase 1 — pure in-memory DFS through stored edges. No Lichess calls, no pruning.
 //             Collects type-1 frontiers (your turn, no stored move) and every
@@ -646,32 +904,88 @@ export interface PathStep {
 //             scores them by game count.
 //   Phase 3 — parallel Lichess queries at type-1 frontier FENs to score them by total
 //             games in the database. Pick the frontier with the most games.
-export async function findTopFrontier(rep: Repertoire, signal?: AbortSignal, trace?: GenerationTrace): Promise<FrontierResult | null> {
-  const queued = await getOpenFrontiers(rep.id);
-  traceStep(trace, `Frontier queue: loaded ${queued.length} open candidate${queued.length === 1 ? '' : 's'} for "${rep.name}".`);
+//
+// Ranking: frontiers are sorted purely by `games` (total Lichess games at the
+// frontier position). `weight` (∏ popularityFraction along the discovery path)
+// is kept on each candidate for diagnostic display, but is NOT used to pick the
+// winner. Past bug: weight was the primary sort key, but stored-edge DFS paths
+// bypassed popularityFraction multiplication, so deep stored frontiers got
+// weight≈1.0 and outranked broad shallow frontiers whose weight correctly
+// decayed. Ranking by games sidesteps that and matches the user's mental model:
+// "which unanswered position will the most real opponents actually reach me in".
+// Do not re-introduce weight into selection. See docs/line-selection.md.
+export async function findTopFrontier(
+  rep: Repertoire,
+  signal?: AbortSignal,
+  trace?: GenerationTrace,
+  start?: GenerationStart,
+  scope: FrontierScope = rootScope(rep),
+  allowBoundedFallback = true
+): Promise<FrontierResult | null> {
+  const [allFrontiers, storedEdges, readyLineQueueSize] = await Promise.all([
+    getFrontiersForRepertoire(rep.id),
+    getEdgesForRepertoire(rep.id),
+    countReadyLines(rep.id, scope.key),
+  ]);
+  const scopedFrontiers = allFrontiers.filter(frontier => frontierInScope(frontier, scope));
+  const counts = frontierStatusCounts(scopedFrontiers);
+  const queuedRaw = await getOpenFrontiers(rep.id, scope.key);
+  const queued = queuedRaw.filter(frontier => frontierInScope(frontier, scope));
+  const filteredAncestorCount = queuedRaw.length - queued.length;
+  traceStep(trace, `Frontier index stats: scope=${scope.key}, storedEdges=${storedEdges.length}, totalKnown=${scopedFrontiers.length}, open=${counts.open}, generatedLineQueueSize=${readyLineQueueSize}, answered=${counts.answered}, blocked=${counts.blocked}, stale=${counts.stale}.`);
+  if (filteredAncestorCount > 0) {
+    traceStep(trace, `Frontier index: filtered ${filteredAncestorCount} ancestor candidate(s) whose path does not pass through scope.startFen=${scope.startFen}. These were stamped with this scope's key at discovery time but sit upstream of the scope endpoint.`);
+  }
   for (const candidate of randomizeNewCardIntroOrder(queued)) {
     const hydrated = await hydrateFrontierCandidate(rep, candidate, trace);
     if (hydrated) {
-      traceStep(trace, `Frontier queue: using stored candidate ${candidate.san} (${candidate.uci}); weight=${candidate.weight.toFixed(5)}, childFen=${candidate.childFen}.`);
+      traceStep(trace, `Line source: frontier-index; selected ${candidate.san} (${candidate.uci}) because it is an open candidate in the top games pool; games=${candidate.games}, weight=${candidate.weight.toFixed(5)} (display only), childFen=${candidate.childFen}.`);
+      hydrated.reason = 'frontier-index';
       return hydrated;
     }
   }
   if (queued.length > 0) {
-    traceStep(trace, 'Frontier queue: no queued candidates were usable; rebuilding from repertoire graph.');
+    traceStep(trace, 'Frontier index: no indexed candidates were usable.');
   }
-  return rebuildFrontierQueue(rep, signal, trace);
+  if (!allowBoundedFallback) return null;
+  traceStep(trace, `Line source: fallback-search; bounded miss for scope=${scope.key}.`);
+  const fallback = await findTopUnansweredOpponentMove(rep, signal, trace, start, scope, {
+    clearFirst: false,
+    maxNodes: TUNING.maxFrontierFallbackNodes,
+    maxExplorerCalls: TUNING.maxFrontierFallbackExplorerCalls,
+    reason: 'fallback-search',
+  });
+  if (fallback) fallback.reason = 'fallback-search';
+  return fallback;
 }
 
-export async function rebuildFrontierQueue(rep: Repertoire, signal?: AbortSignal, trace?: GenerationTrace): Promise<FrontierResult | null> {
-  traceStep(trace, `Frontier queue: rebuilding for "${rep.name}".`);
-  await clearFrontiersForRepertoire(rep.id);
-  return findTopUnansweredOpponentMove(rep, signal, trace);
+export async function rebuildFrontierQueue(
+  rep: Repertoire,
+  signal?: AbortSignal,
+  trace?: GenerationTrace,
+  openingScope?: GenerationOpeningScope | null
+): Promise<FrontierResult | null> {
+  const start = await prepareGenerationStart(rep, openingScope ?? null, trace);
+  const scope = scopeFromStart(rep, openingScope ?? null, start);
+  traceStep(trace, `Frontier refill start: reason=full-rebuild, scope=${scope.key}; preserving blocked/rejected frontier state.`);
+  return findTopUnansweredOpponentMove(rep, signal, trace, start, scope, {
+    clearFirst: false,
+    maxNodes: TUNING.maxFrontierRebuildNodes,
+    maxExplorerCalls: TUNING.maxFrontierExplorerCalls,
+    reason: 'full-rebuild',
+  });
 }
 
 async function hydrateFrontierCandidate(rep: Repertoire, candidate: FrontierCandidate, trace?: GenerationTrace): Promise<FrontierResult | null> {
+  if (!frontierPathMatchesRoot(rep.rootFen, candidate)) {
+    traceStep(trace, `Frontier index: candidate ${candidate.san} (${candidate.uci}) starts from a stale root; marking blocked.`);
+    await markFrontierBlocked(candidate.id, 'This queued frontier was built from an older repertoire root.');
+    return null;
+  }
+
   const childEdges = await getEdgesFromParent(rep.id, candidate.childFen);
   if (childEdges.some(edge => edge.mover === rep.color && !edge.isScaffold)) {
-    traceStep(trace, `Frontier queue: candidate ${candidate.san} (${candidate.uci}) already has a user reply; marking answered.`);
+    traceStep(trace, `Frontier index: candidate ${candidate.san} (${candidate.uci}) already has a user reply; marking answered.`);
     await markFrontierAnswered(candidate.id, 'A trainable user reply already exists at this frontier.');
     return null;
   }
@@ -696,6 +1010,16 @@ async function hydrateFrontierCandidate(rep: Repertoire, candidate: FrontierCand
     candidateId: candidate.id,
     path,
   };
+}
+
+function frontierPathMatchesRoot(rootFen: NormFen, candidate: FrontierCandidate): boolean {
+  if (candidate.path.length === 0) return candidate.childFen === rootFen;
+  let cursorFen = rootFen;
+  for (const step of candidate.path) {
+    if (step.fromFen !== cursorFen) return false;
+    cursorFen = step.toFen;
+  }
+  return cursorFen === candidate.childFen;
 }
 
 export async function findTopFrontierLegacy(rep: Repertoire, signal?: AbortSignal): Promise<FrontierResult | null> {
@@ -836,11 +1160,17 @@ interface DiscoveredFrontier {
   source: FrontierSource;
 }
 
-function frontierCandidateFromDiscovery(rep: Repertoire, frontier: DiscoveredFrontier): FrontierCandidate {
+function frontierCandidateFromDiscovery(rep: Repertoire, frontier: DiscoveredFrontier, scope: FrontierScope): FrontierCandidate {
   const now = new Date().toISOString();
   return {
-    id: frontierId(rep.id, frontier.parentFen, frontier.uci),
+    id: scopedFrontierId(rep, frontier, scope),
     repertoireId: rep.id,
+    color: rep.color,
+    openingKey: scope.openingKey,
+    openingName: scope.openingName,
+    scopeKey: scope.key,
+    rootFen: scope.rootFen,
+    startFen: scope.startFen,
     parentFen: frontier.parentFen,
     childFen: frontier.fen,
     san: frontier.san,
@@ -865,7 +1195,20 @@ function frontierCandidateFromDiscovery(rep: Repertoire, frontier: DiscoveredFro
   };
 }
 
-async function findTopUnansweredOpponentMove(rep: Repertoire, signal?: AbortSignal, trace?: GenerationTrace): Promise<FrontierResult | null> {
+async function findTopUnansweredOpponentMove(
+  rep: Repertoire,
+  signal?: AbortSignal,
+  trace?: GenerationTrace,
+  start?: GenerationStart,
+  scope: FrontierScope = rootScope(rep),
+  limits: FrontierSearchLimits = {
+    clearFirst: false,
+    maxNodes: TUNING.maxFrontierRebuildNodes,
+    maxExplorerCalls: TUNING.maxFrontierExplorerCalls,
+    reason: 'frontier-index',
+  }
+): Promise<FrontierResult | null> {
+  if (limits.clearFirst) await clearFrontiersForRepertoire(rep.id, scope.key);
   const all = await getEdgesForRepertoire(rep.id);
   const byParent = new Map<NormFen, Edge[]>();
   for (const edge of all) {
@@ -875,9 +1218,21 @@ async function findTopUnansweredOpponentMove(rep: Repertoire, signal?: AbortSign
   }
 
   const frontiers: DiscoveredFrontier[] = [];
-  const stack: Array<{ fen: NormFen; path: PathStep[]; weight: number }> = [{ fen: rep.rootFen, path: [], weight: 1 }];
+  const startPath = start?.path.map(edge => ({
+    fromFen: edge.parentFen,
+    toFen: edge.childFen,
+    san: edge.san,
+    uci: edge.uci,
+    mover: edge.mover,
+    edge,
+    popularityFraction: 1,
+    source: 'stored' as FrontierSource,
+  })) ?? [];
+  const stack: Array<{ fen: NormFen; path: PathStep[]; weight: number }> = [{ fen: start?.startFen ?? rep.rootFen, path: startPath, weight: 1 }];
   const visited = new Set<string>();
-  traceStep(trace, `Frontier search: repertoire="${rep.name}", color=${rep.color}, root=${rep.rootFen}, storedEdges=${all.length}, maxPlies=${TUNING.maxFrontierPlies}`);
+  let explorerCalls = 0;
+  let stopReason = 'exhausted';
+  traceStep(trace, `Frontier refill search: reason=${limits.reason}, scope=${scope.key}, repertoire="${rep.name}", color=${rep.color}, root=${rep.rootFen}, start=${start?.startFen ?? rep.rootFen}, storedEdges=${all.length}, maxNodes=${limits.maxNodes}, maxExplorerCalls=${limits.maxExplorerCalls}`);
 
   while (stack.length) {
     if (signal?.aborted) {
@@ -888,6 +1243,10 @@ async function findTopUnansweredOpponentMove(rep: Repertoire, signal?: AbortSign
     const visitKey = `${fen}|${path.length}`;
     if (visited.has(visitKey)) continue;
     visited.add(visitKey);
+    if (visited.size > limits.maxNodes) {
+      stopReason = 'node-limit';
+      break;
+    }
     if (path.length >= TUNING.maxFrontierPlies) {
       traceStep(trace, `Frontier search: max depth reached at ply ${path.length}, fen=${fen}`);
       continue;
@@ -898,15 +1257,13 @@ async function findTopUnansweredOpponentMove(rep: Repertoire, signal?: AbortSign
     }
 
     const stored = byParent.get(fen) ?? [];
-    traceStep(trace, `Frontier search: visiting ply=${path.length}, turn=${turnAt(fen)}, weight=${weight.toFixed(5)}, storedChildren=${stored.length}, fen=${fen}`);
     if (turnAt(fen) === rep.color) {
       const userEdges = stored.filter(edge => edge.mover === rep.color);
       if (userEdges.length === 0) {
-        traceStep(trace, `Frontier search: your turn but no stored ${rep.color} move here; this path cannot reach an opponent frontier. fen=${fen}`);
+        // A frontier is created by the opponent move that led to this position.
       }
       for (const edge of stored) {
         if (edge.mover !== rep.color) continue;
-        traceStep(trace, `Frontier search: following stored user move ${edge.san} (${edge.uci}).`);
         stack.push({
           fen: edge.childFen,
           weight,
@@ -925,8 +1282,12 @@ async function findTopUnansweredOpponentMove(rep: Repertoire, signal?: AbortSign
       continue;
     }
 
+    if (explorerCalls >= limits.maxExplorerCalls) {
+      stopReason = 'explorer-call-limit';
+      break;
+    }
+    explorerCalls++;
     const opponentMoves = await getOpponentMovesForFrontier(fen, stored, signal, trace);
-    traceStep(trace, `Frontier search: opponent node produced ${opponentMoves.length} candidate moves.`);
     for (const move of opponentMoves) {
       const result = applyMove(fen, uciToObj(move.uci)) ?? applyMove(fen, move.san);
       if (!result) {
@@ -935,7 +1296,6 @@ async function findTopUnansweredOpponentMove(rep: Repertoire, signal?: AbortSign
       }
       const nextWeight = weight * (move.popularityFraction || 0.01);
       if (nextWeight < 0.001) {
-        traceStep(trace, `Frontier search: skipped ${move.san} (${move.uci}) because next weight ${nextWeight.toFixed(5)} is below 0.001.`);
         continue;
       }
       const nextPath = [...path, {
@@ -952,7 +1312,6 @@ async function findTopUnansweredOpponentMove(rep: Repertoire, signal?: AbortSign
       const childStored = byParent.get(result.fen) ?? [];
       const hasUserReply = childStored.some(edge => edge.mover === rep.color && !edge.isScaffold);
       if (!hasUserReply) {
-        traceStep(trace, `Frontier search: FOUND frontier after ${move.san} (${move.uci}); child has no trainable user reply. childFen=${result.fen}`);
         frontiers.push({
           fen: result.fen,
           path: nextPath,
@@ -965,32 +1324,50 @@ async function findTopUnansweredOpponentMove(rep: Repertoire, signal?: AbortSign
           popularityFraction: move.popularityFraction,
           source: move.source,
         });
+        if (limits.stopAfterFrontiers !== undefined && frontiers.length >= limits.stopAfterFrontiers) {
+          stopReason = 'frontier-cap-reached';
+          stack.length = 0;
+          break;
+        }
       } else {
-        traceStep(trace, `Frontier search: user reply exists after ${move.san}; continuing deeper.`);
         stack.push({ fen: result.fen, path: nextPath, weight: nextWeight });
       }
     }
   }
 
   if (frontiers.length === 0) {
-    traceStep(trace, `Frontier search: no frontiers found after visiting ${visited.size} positions.`);
+    traceStep(trace, `Frontier refill stop: reason=${stopReason}, scope=${scope.key}, indexSize=0, nodesInspected=${visited.size}, explorerCalls=${explorerCalls}.`);
     return null;
   }
-  frontiers.sort((a, b) => (b.weight - a.weight) || (b.games - a.games));
-  await putFrontiers(frontiers.map(frontier => frontierCandidateFromDiscovery(rep, frontier)));
-  traceStep(trace, `Frontier queue: stored ${frontiers.length} open candidate${frontiers.length === 1 ? '' : 's'} for "${rep.name}".`);
-  const winner = randomizeNewCardIntroOrder(frontiers)[0];
-  traceStep(trace, `Frontier search: selected frontier weight=${winner.weight.toFixed(5)}, games=${winner.games}, fen=${winner.fen}, pathLength=${winner.path.length}`);
-  return { fen: winner.fen, cumulativeProbability: winner.weight, candidateId: frontierId(rep.id, winner.parentFen, winner.uci), path: winner.path };
+  // Rank by raw `games` only (response volume at the frontier). `weight` stays
+  // on each candidate for display/debug but does NOT influence selection.
+  frontiers.sort((a, b) => b.games - a.games);
+  const candidateRows = frontiers.map(frontier => frontierCandidateFromDiscovery(rep, frontier, scope));
+  const discoveredById = new Map(candidateRows.map((row, idx) => [row.id, frontiers[idx]]));
+  await putFrontiers(candidateRows);
+  traceStep(trace, `Frontier refill stop: reason=${stopReason}, scope=${scope.key}, indexSize=${frontiers.length}, nodesInspected=${visited.size}, explorerCalls=${explorerCalls}.`);
+  const openRows = await getOpenFrontiers(rep.id, scope.key);
+  const eligibleRows = openRows.filter(row => discoveredById.has(row.id));
+  if (eligibleRows.length === 0) {
+    traceStep(trace, `Frontier index: discovered ${frontiers.length} candidate(s), but none are open after preserving blocked/rejected state.`);
+    return null;
+  }
+  const winnerRow = randomizeNewCardIntroOrder(eligibleRows)[0];
+  const winner = discoveredById.get(winnerRow.id)!;
+  traceStep(trace, `Frontier index: selected frontier from rebuilt index because it is in the top games pool; games=${winner.games}, weight=${winner.weight.toFixed(5)} (display only), fen=${winner.fen}, pathLength=${winner.path.length}`);
+  return { fen: winner.fen, cumulativeProbability: winner.weight, candidateId: winnerRow.id, path: winner.path };
 }
 
+// Picks the top-`games` candidates and shuffles within the leading "close" group
+// so the user doesn't keep getting the same exact frontier when several are
+// roughly equally popular. Ranking and pool-membership use `games` ONLY.
 function randomizeNewCardIntroOrder<T extends { weight: number; games: number }>(candidates: T[]): T[] {
   if (candidates.length <= 1) return candidates;
-  const sorted = [...candidates].sort((a, b) => (b.weight - a.weight) || (b.games - a.games));
+  const sorted = [...candidates].sort((a, b) => b.games - a.games);
   const best = sorted[0];
   const topPool = sorted.filter(candidate => {
-    const closeWeight = best.weight === 0 ? candidate.weight === 0 : candidate.weight >= best.weight * 0.8;
-    return closeWeight && candidate.games >= best.games * 0.5;
+    if (best.games === 0) return candidate.games === 0;
+    return candidate.games >= best.games * 0.5;
   }).slice(0, 5);
   const rest = sorted.filter(candidate => !topPool.includes(candidate));
   return [...shuffle(topPool), ...rest];
@@ -1080,6 +1457,17 @@ async function getOpponentMovesForFrontier(
 //
 // Side effect: persists all path-leading edges (from rep root → frontier) and all generated
 // edges (frontier → end of line) into the repertoire.
+// Where a GeneratedLine's frontier was sourced from. Used for the in-UI
+// "Selection details" panel and the Copy line report — not for any selection
+// logic. Cache hits set this to 'cache-hit' on rehydrate; fresh generation
+// sets it based on which branch of the frontier finder won.
+export type LineSelectionReason =
+  | 'frontier-index'        // hit on the stored frontier index for this scope
+  | 'fallback-search'       // bounded re-search after the index missed
+  | 'stockfish-fallback'    // no usable frontier at all; engine drove the line
+  | 'cache-hit'             // served from the persistent ReadyLine cache
+  | 'continue';             // continueLearnLine (resumed a partial line)
+
 export interface GeneratedLine {
   // The full sequence of edges from rep root → end of generated line, in order.
   fullPath: Edge[];
@@ -1090,6 +1478,20 @@ export interface GeneratedLine {
   // Local frontier queue row that seeded this line, when available.
   frontierId?: string;
   frontierFen?: NormFen;
+  // Diagnostic only — surfaces in the Selection details panel. Never used by
+  // any selection logic. See docs/line-selection.md.
+  selectionReason?: LineSelectionReason;
+}
+
+export interface GenerationOpeningScope {
+  key: string;
+  name: string;
+  moves: string[];
+}
+
+interface GenerationStart {
+  startFen: NormFen;
+  path: Edge[];
 }
 
 interface ActiveSourceLine {
@@ -1098,17 +1500,62 @@ interface ActiveSourceLine {
   playerName: string;
 }
 
-export async function generateLearnLine(
+async function prepareGenerationStart(rep: Repertoire, openingScope: GenerationOpeningScope | null, trace?: GenerationTrace): Promise<GenerationStart> {
+  if (!openingScope) return { startFen: rep.rootFen, path: [] };
+
+  let cursorFen: NormFen = STARTING_FEN_NORM;
+  let rootPly: number | null = rep.rootFen === STARTING_FEN_NORM ? 0 : null;
+  for (const [idx, move] of openingScope.moves.entries()) {
+    const result = applyMove(cursorFen, move);
+    if (!result) throw new Error(`${openingScope.name} has an invalid base move at ply ${idx + 1}: ${move}`);
+    cursorFen = result.fen;
+    if (rootPly === null && cursorFen === rep.rootFen) rootPly = idx + 1;
+  }
+  if (rootPly === null) {
+    throw new Error(`${openingScope.name} cannot legally connect to ${rep.name}'s repertoire root.`);
+  }
+
+  const movesFromRoot = openingScope.moves.slice(rootPly);
+  if (movesFromRoot.length > 0) {
+    traceStep(trace, `Line generation: ensuring opening scope path for ${openingScope.name}: ${movesFromRoot.join(' ')}.`);
+    await addMovesToRepertoire(rep, movesFromRoot, { scaffoldPlyCount: movesFromRoot.length });
+  }
+
+  const path: Edge[] = [];
+  cursorFen = rep.rootFen;
+  for (const move of movesFromRoot) {
+    const result = applyMove(cursorFen, move);
+    if (!result) throw new Error(`${openingScope.name} cannot play ${move} from ${cursorFen}.`);
+    const edge = await getEdge(rep.id, cursorFen, result.fen);
+    if (!edge) throw new Error(`${openingScope.name} scope edge was not stored for ${move}.`);
+    path.push(edge);
+    cursorFen = result.fen;
+  }
+
+  traceStep(trace, `Line generation: constrained to ${openingScope.name}; startFen=${cursorFen}; scopePath=${path.length}.`);
+  return { startFen: cursorFen, path };
+}
+
+// One generation pass: walks the existing frontier, extends with picked user/opponent
+// moves, persists everything to the repertoire DB. The new generateLearnLine wrapper
+// (below) calls this up to TUNING.qualityGateMaxAttempts times and uses snapshot-diff
+// cleanup to remove any edges/frontiers from rejected attempts.
+export async function generateLearnLineOnce(
   rep: Repertoire,
   yourMoveBudget = 5,
   signal?: AbortSignal,
-  trace?: GenerationTrace
+  trace?: GenerationTrace,
+  openingScope?: GenerationOpeningScope | null
 ): Promise<GeneratedLine | null> {
-  traceStep(trace, `Line generation: starting for repertoire="${rep.name}", color=${rep.color}, budget=${yourMoveBudget}.`);
-  const frontier = await findTopFrontier(rep, signal, trace);
+  traceStep(trace, `Line generation: starting for repertoire="${rep.name}", color=${rep.color}, budget=${yourMoveBudget}, openingScope=${openingScope?.name ?? 'none'}.`);
+  const generationStart = await prepareGenerationStart(rep, openingScope ?? null, trace);
+  const scope = scopeFromStart(rep, openingScope ?? null, generationStart);
+  const frontier = await findTopFrontier(rep, signal, trace, generationStart, scope, true);
   if (!frontier) {
-    traceStep(trace, 'Line generation: no frontier found; trying Stockfish-only fallback from deepest stored leaf.');
-    return generateStockfishFallbackLine(rep, yourMoveBudget, signal, trace);
+    traceStep(trace, 'Line source: stockfish-fallback; no indexed or bounded frontier found.');
+    const fallback = await generateStockfishFallbackLine(rep, yourMoveBudget, signal, trace, generationStart);
+    if (fallback) fallback.selectionReason = 'stockfish-fallback';
+    return fallback;
   }
   traceStep(trace, `Line generation: frontier ready at ${frontier.fen}; pathLength=${frontier.path.length}.`);
   const activeFrontierId = frontier.candidateId;
@@ -1120,6 +1567,10 @@ export async function generateLearnLine(
   const fullPath: Edge[] = [];
   let cursorFen = rep.rootFen;
   for (const step of frontier.path) {
+    if (step.fromFen !== cursorFen) {
+      traceStep(trace, `Line generation: frontier path mismatch. expected=${cursorFen}, got=${step.fromFen}.`);
+      throw new FrontierGenerationError('Frontier path no longer matches this repertoire root.', activeFrontierId);
+    }
     if (step.edge) {
       traceStep(trace, `Line generation: path uses stored edge ${step.san} (${step.uci}).`);
       fullPath.push(step.edge);
@@ -1128,7 +1579,7 @@ export async function generateLearnLine(
       const r = await playMoveInRepertoire(rep.id, cursorFen, step.san);
       if (!r) {
         traceStep(trace, `Line generation: failed to persist implicit edge ${step.san} at ${cursorFen}.`);
-        return null;
+        throw new FrontierGenerationError(`Could not persist frontier path move ${step.san} at ${cursorFen}.`, activeFrontierId);
       }
       fullPath.push(r.edge);
     }
@@ -1252,22 +1703,360 @@ export async function generateLearnLine(
 
   if (yourMovesAdded === 0) {
     traceStep(trace, 'Line generation: failed because zero user moves were added.');
-    if (activeFrontierId) {
-      await markFrontierBlocked(activeFrontierId, 'Line generation could not add a user move from this frontier.');
-      traceStep(trace, `Frontier queue: marked ${activeFrontierId} blocked because no user moves were added.`);
-    }
-    return null;
+    throw new FrontierGenerationError('Line generation could not add a user move from this frontier.', activeFrontierId);
   }
   if (activeFrontierId) {
     await markFrontierAnswered(activeFrontierId, 'Line generation added at least one user move from this frontier.');
-    traceStep(trace, `Frontier queue: marked ${activeFrontierId} answered.`);
+    traceStep(trace, `Frontier index: marked ${activeFrontierId} answered.`);
   }
   const answeredCount = await markFrontiersAnsweredByChildFen(rep.id, activeFrontierFen, 'Line generation added a user move from this frontier position.');
   if (answeredCount > 0) {
-    traceStep(trace, `Frontier queue: marked ${answeredCount} candidate${answeredCount === 1 ? '' : 's'} answered for childFen=${activeFrontierFen}.`);
+    traceStep(trace, `Frontier index: marked ${answeredCount} candidate${answeredCount === 1 ? '' : 's'} answered for childFen=${activeFrontierFen}.`);
   }
-  traceStep(trace, `Line generation: success. fullPath=${fullPath.length}, newEdges=${newEdges.length}, generationStartIndex=${generationStartIndex}.`);
-  return { fullPath, newEdges, generationStartIndex, frontierId: activeFrontierId, frontierFen: activeFrontierFen };
+  traceStep(trace, `Line generation: success. fullPath=${fullPath.length}, newEdges=${newEdges.length}, generationStartIndex=${generationStartIndex}, source=${frontier.reason ?? 'unknown'}.`);
+  return { fullPath, newEdges, generationStartIndex, frontierId: activeFrontierId, frontierFen: activeFrontierFen, selectionReason: frontier.reason };
+}
+
+// Quality-gated wrapper around generateLearnLineOnce. Generates a line, then
+// deep-evaluates its start and end FENs at TUNING.engineDepthGate and logs
+// PASS/FAIL with full reasoning. The line is returned regardless — the gate is a
+// diagnostic, not a rejection. Failures show up in the trace panel and the
+// copy-paste log so you can see exactly why a line is leaking advantage.
+//
+// On FAIL, the wrapper rolls back generated edges, marks the specific frontier
+// blocked after rollback, and lets the next attempt select another indexed candidate.
+export async function generateLearnLine(
+  rep: Repertoire,
+  yourMoveBudget = 5,
+  signal?: AbortSignal,
+  trace?: GenerationTrace,
+  openingScope?: GenerationOpeningScope | null
+): Promise<GeneratedLine | null> {
+  const deadline = Date.now() + TUNING.qualityGateTimeoutMs;
+  let lastFailure = 'No attempts were run.';
+  let activeScope: FrontierScope | null = null;
+  let activeStart: GenerationStart | null = null;
+  let unblockedFailureCount = 0;
+  let attemptedCandidates = 0;
+  let failedQualityGate = 0;
+  let failedNoUserMove = 0;
+  let failedOther = 0;
+  try {
+    const preflightStart = await prepareGenerationStart(rep, openingScope ?? null, trace);
+    const preflightScope = scopeFromStart(rep, openingScope ?? null, preflightStart);
+    activeScope = preflightScope;
+    activeStart = preflightStart;
+    const existingOpen = await getOpenFrontiers(rep.id, preflightScope.key);
+    if (existingOpen.length === 0) {
+      traceStep(trace, `Frontier index preflight: no open candidates for scope=${preflightScope.key}; searching for more candidates without unblocking rejected ones.`);
+      await findTopUnansweredOpponentMove(rep, signal, trace, preflightStart, preflightScope, {
+        clearFirst: false,
+        maxNodes: TUNING.maxFrontierRebuildNodes,
+        maxExplorerCalls: TUNING.maxFrontierExplorerCalls,
+        reason: 'preflight-search',
+      });
+    }
+  } catch (e) {
+    if (signal?.aborted) return null;
+    traceStep(trace, `Frontier index preflight failed: ${describeError(e)}`);
+  }
+
+  for (let attempt = 1; ; attempt++) {
+    if (signal?.aborted) {
+      traceStep(trace, `Quality gate: aborted before attempt ${attempt}.`);
+      return null;
+    }
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      traceStep(trace, `Quality gate: timeout before attempt ${attempt} (${TUNING.qualityGateTimeoutMs / 1000}s wall clock).`);
+      break;
+    }
+    if (activeScope && attempt > 1) {
+      const openBeforeAttempt = await getOpenFrontiers(rep.id, activeScope.key);
+      if (openBeforeAttempt.length === 0) {
+        traceStep(trace, `Frontier index: no open candidates remain for scope=${activeScope.key}; running final search without unblocking rejected candidates.`);
+        const searchStart = activeStart ?? await prepareGenerationStart(rep, openingScope ?? null, trace);
+        await findTopUnansweredOpponentMove(rep, signal, trace, searchStart, activeScope, {
+          clearFirst: false,
+          maxNodes: TUNING.maxFrontierRebuildNodes,
+          maxExplorerCalls: TUNING.maxFrontierExplorerCalls,
+          reason: 'final-frontier-search',
+        });
+        const openAfterRebuild = await getOpenFrontiers(rep.id, activeScope.key);
+        if (openAfterRebuild.length === 0) {
+          lastFailure = 'No open frontier candidates remained after rebuild/search.';
+          traceStep(trace, `Frontier index: final search produced no open candidates for scope=${activeScope.key}.`);
+          break;
+        }
+      }
+    }
+
+    const snapshot = await snapshotGenerationState(rep.id);
+    const attemptSignal = makeAttemptSignal(signal, remainingMs);
+    let accepted = false;
+    let rejectedFrontierId: string | undefined;
+    let rejectedReason: string | undefined;
+    try {
+      traceStep(trace, `Quality gate: attempt ${attempt} started; ${Math.ceil(remainingMs / 1000)}s remaining.`);
+      const line = await generateLearnLineOnce(rep, yourMoveBudget, attemptSignal.signal, trace, openingScope);
+      attemptedCandidates++;
+      if (signal?.aborted) {
+        lastFailure = 'Attempt aborted by parent signal.';
+        traceStep(trace, `Quality gate: attempt ${attempt} aborted by parent signal.`);
+        break;
+      }
+      if (!line) {
+        if (attemptSignal.signal.aborted) {
+          lastFailure = 'Attempt aborted.';
+          traceStep(trace, `Quality gate: attempt ${attempt} aborted.`);
+          break;
+        }
+        lastFailure = 'Generator returned no line.';
+        traceStep(trace, `Quality gate: attempt ${attempt} produced no line.`);
+      } else {
+        if (attemptSignal.signal.aborted) {
+          traceStep(trace, `Quality gate: attempt ${attempt} signal timed out, but a line was produced; evaluating it before discarding.`);
+        }
+        const startFen = line.fullPath[line.generationStartIndex - 1]?.childFen ?? rep.rootFen;
+        const endFen = line.fullPath[line.fullPath.length - 1]?.childFen ?? startFen;
+        const quality = await evaluateLineQuality(startFen, endFen, rep.color, signal, trace);
+        const respectsScope = assertLineRespectsScope(line, rep, openingScope ?? null, trace);
+        if (quality.passed && respectsScope) {
+          accepted = true;
+          traceStep(trace, `Quality gate: attempt ${attempt} accepted.`);
+          return line;
+        }
+        lastFailure = respectsScope ? quality.reason : 'Generated line did not respect the selected opening scope.';
+        rejectedFrontierId = line.frontierId;
+        rejectedReason = `Quality gate rejected this generated line: ${lastFailure}`;
+        failedQualityGate++;
+        traceStep(trace, `Quality gate: attempt ${attempt} rejected: ${lastFailure}`);
+      }
+    } catch (e) {
+      if (attemptSignal.signal.aborted || signal?.aborted) {
+        lastFailure = 'Attempt aborted.';
+        traceStep(trace, `Quality gate: attempt ${attempt} aborted during generation.`);
+        break;
+      }
+      if (e instanceof FrontierGenerationError) {
+        rejectedFrontierId = e.frontierId;
+        rejectedReason = e.message;
+        if (e.message.toLowerCase().includes('user move')) failedNoUserMove++;
+        else failedOther++;
+        attemptedCandidates++;
+      } else {
+        failedOther++;
+      }
+      lastFailure = describeError(e);
+      traceStep(trace, `Quality gate: attempt ${attempt} threw: ${lastFailure}`);
+    } finally {
+      attemptSignal.cleanup();
+      if (!accepted) {
+        const restored = await restoreGenerationState(rep.id, snapshot);
+        traceStep(trace, `Quality gate: rolled back attempt ${attempt}; deletedEdges=${restored.deletedEdges}, restoredEdges=${restored.restoredEdges}, deletedFrontiers=${restored.deletedFrontiers}, restoredFrontiers=${restored.restoredFrontiers}.`);
+        if (rejectedFrontierId && rejectedReason) {
+          await markFrontierBlocked(rejectedFrontierId, rejectedReason);
+          traceStep(trace, `Frontier index: marked ${rejectedFrontierId} blocked after rollback. reason=${rejectedReason}`);
+          unblockedFailureCount = 0;
+        } else {
+          unblockedFailureCount++;
+          if (unblockedFailureCount >= TUNING.qualityGateMaxAttempts) {
+            traceStep(trace, `Quality gate: stopping after ${unblockedFailureCount} failure(s) that were not tied to a specific frontier.`);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (activeScope) {
+    const [openFinal, allFrontiers, readyFinal] = await Promise.all([
+      getOpenFrontiers(rep.id, activeScope.key),
+      getFrontiersForRepertoire(rep.id),
+      countReadyLines(rep.id, activeScope.key),
+    ]);
+    const scoped = allFrontiers.filter(frontier => frontierInScope(frontier, activeScope!));
+    const counts = frontierStatusCounts(scoped);
+    traceStep(trace, `Generation failure summary: scope=${activeScope.key}, attemptedCandidates=${attemptedCandidates}, failedQualityGate=${failedQualityGate}, failedNoUserMove=${failedNoUserMove}, failedOther=${failedOther}, totalKnownFrontiers=${scoped.length}, openFrontiers=${openFinal.length}, blockedFrontiers=${counts.blocked}, answeredFrontiers=${counts.answered}, generatedLineQueueSize=${readyFinal}, lastFailure=${lastFailure}`);
+  }
+  traceStep(trace, `Quality gate: no acceptable line before frontier exhaustion or ${TUNING.qualityGateTimeoutMs / 1000}s timeout. Last failure: ${lastFailure}`);
+  return null;
+}
+
+function makeAttemptSignal(parent: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort();
+  if (parent) {
+    if (parent.aborted) controller.abort();
+    else parent.addEventListener('abort', abortFromParent, { once: true });
+  }
+  const timeout = globalThis.setTimeout(() => controller.abort(), Math.max(0, timeoutMs));
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      globalThis.clearTimeout(timeout);
+      parent?.removeEventListener('abort', abortFromParent);
+    },
+  };
+}
+
+// Scope-leak invariant: when a line is generated for an opening scope, every edge in
+// the line's path should walk away from the scope's startFen — i.e., the first edge's
+// parentFen should equal startFen, and each subsequent edge's parentFen should equal
+// the previous edge's childFen. If we find an edge that walks back to rep.rootFen
+// (or anywhere not reachable from the scope), the scope filter has leaked somewhere
+// upstream. Logs LOUDLY to the trace; doesn't throw, since "show what we got" is
+// better than "show nothing" if the user already invested time.
+export function assertLineRespectsScope(
+  line: GeneratedLine,
+  rep: Repertoire,
+  openingScope: GenerationOpeningScope | null,
+  trace?: GenerationTrace
+): boolean {
+  if (!openingScope) return true; // No scope, no constraint.
+  // Compute the expected start FEN by walking the scope's moves from the standard start.
+  let expectedStart: NormFen = STARTING_FEN_NORM;
+  for (const move of openingScope.moves) {
+    const r = applyMove(expectedStart, move);
+    if (!r) {
+      traceStep(trace, `SCOPE-LEAK CHECK: skipped — opening scope "${openingScope.name}" has invalid move "${move}" at ${expectedStart}.`);
+      return true;
+    }
+    expectedStart = r.fen;
+  }
+  // The first edge of the line must originate at expectedStart (after all opening scope moves).
+  const firstEdge = line.fullPath[0];
+  if (!firstEdge) return true;
+  if (firstEdge.parentFen !== expectedStart) {
+    // The line might be allowed to start before the scope's start FEN if the rep root is earlier
+    // and the scope path is part of fullPath — check that expectedStart appears somewhere in fullPath.
+    const containsScopeStart = line.fullPath.some(e => e.parentFen === expectedStart || e.childFen === expectedStart);
+    if (!containsScopeStart) {
+      traceStep(trace, `!!! SCOPE LEAK !!! Line generated for scope "${openingScope.name}" (expected startFen=${expectedStart}) does not include that FEN anywhere in its ${line.fullPath.length}-edge path. First edge parentFen=${firstEdge.parentFen}. Repertoire rootFen=${rep.rootFen}. This is the bug — the picker ignored scope.`);
+      return false;
+    }
+  }
+  // Verify the path is actually contiguous (no missing links).
+  for (let i = 1; i < line.fullPath.length; i++) {
+    const prev = line.fullPath[i - 1];
+    const cur = line.fullPath[i];
+    if (cur.parentFen !== prev.childFen) {
+      traceStep(trace, `!!! PATH-CONTIGUITY LEAK !!! Edge ${i} (${cur.san}) parentFen=${cur.parentFen} does not match edge ${i - 1} (${prev.san}) childFen=${prev.childFen}.`);
+      return false;
+    }
+  }
+  return true;
+}
+
+// Rehydrate a cached ReadyLine back into a GeneratedLine by looking up each edge ID
+// from the edges store. If any edge is missing (e.g. the user deleted a subtree since
+// the line was cached), returns null so the caller can fall through to live generation.
+// Edges always reflect the latest DB state — SRS updates from interim training are
+// picked up automatically.
+export async function rehydrateReadyLine(ready: ReadyLine): Promise<GeneratedLine | null> {
+  const fullPath: Edge[] = [];
+  for (const id of ready.fullPathEdgeIds) {
+    const edge = await getEdgeById(id);
+    if (!edge) return null;
+    fullPath.push(edge);
+  }
+  const newSet = new Set(ready.newEdgeIds);
+  const newEdges = fullPath.filter(e => newSet.has(e.id));
+  return {
+    fullPath,
+    newEdges,
+    generationStartIndex: ready.generationStartIndex,
+    frontierId: ready.frontierId,
+    frontierFen: ready.frontierFen,
+    selectionReason: 'cache-hit',
+  };
+}
+
+export async function repairFrontierIndexAfterLearn(
+  rep: Repertoire,
+  line: GeneratedLine,
+  openingScope?: GenerationOpeningScope | null,
+  signal?: AbortSignal,
+  trace?: GenerationTrace
+): Promise<void> {
+  const start = await prepareGenerationStart(rep, openingScope ?? null, trace);
+  const scope = scopeFromStart(rep, openingScope ?? null, start);
+  const candidates: DiscoveredFrontier[] = [];
+  const inspected = new Set<NormFen>();
+  let explorerCalls = 0;
+
+  const pathToFen = (fen: NormFen): PathStep[] | null => {
+    const path: PathStep[] = [];
+    let cursor = rep.rootFen;
+    if (fen === cursor) return path;
+    for (const edge of line.fullPath) {
+      if (edge.parentFen !== cursor) return null;
+      path.push({
+        fromFen: edge.parentFen,
+        toFen: edge.childFen,
+        san: edge.san,
+        uci: edge.uci,
+        mover: edge.mover,
+        edge,
+        popularityFraction: 1,
+        source: 'stored',
+      });
+      cursor = edge.childFen;
+      if (cursor === fen) return path;
+    }
+    return null;
+  };
+
+  const affected = new Set<NormFen>();
+  for (const edge of line.fullPath) {
+    affected.add(edge.parentFen);
+    affected.add(edge.childFen);
+  }
+
+  traceStep(trace, `Frontier repair start: scope=${scope.key}, affectedPositions=${affected.size}.`);
+  for (const fen of affected) {
+    if (signal?.aborted) break;
+    if (inspected.has(fen) || turnAt(fen) === rep.color || chessFromFen(fen).isGameOver()) continue;
+    const path = pathToFen(fen);
+    if (!path) continue;
+    inspected.add(fen);
+    if (explorerCalls >= TUNING.maxFrontierFallbackExplorerCalls) break;
+    const stored = await getEdgesFromParent(rep.id, fen);
+    explorerCalls++;
+    const moves = await getOpponentMovesForFrontier(fen, stored, signal, trace);
+    for (const move of moves) {
+      const result = applyMove(fen, uciToObj(move.uci)) ?? applyMove(fen, move.san);
+      if (!result) continue;
+      const childStored = await getEdgesFromParent(rep.id, result.fen);
+      const hasUserReply = childStored.some(edge => edge.mover === rep.color && !edge.isScaffold);
+      if (hasUserReply) continue;
+      const nextPath: PathStep[] = [...path, {
+        fromFen: fen,
+        toFen: result.fen,
+        san: result.san,
+        uci: result.uci,
+        mover: result.mover,
+        edge: move.storedEdge,
+        popularityFraction: move.popularityFraction,
+        source: move.source,
+      }];
+      const weight = nextPath.reduce((acc, step) => acc * (step.mover === rep.color ? 1 : Math.max(step.popularityFraction, 0.01)), 1);
+      candidates.push({
+        fen: result.fen,
+        path: nextPath,
+        games: move.games,
+        weight,
+        parentFen: fen,
+        san: result.san,
+        uci: result.uci,
+        mover: result.mover,
+        popularityFraction: move.popularityFraction,
+        source: move.source,
+      });
+    }
+  }
+  await putFrontiers(candidates.map(frontier => frontierCandidateFromDiscovery(rep, frontier, scope)));
+  traceStep(trace, `Frontier repair stop: scope=${scope.key}, indexAdded=${candidates.length}, nodesInspected=${inspected.size}, explorerCalls=${explorerCalls}.`);
 }
 
 // Stockfish-only line generation used when findTopFrontier returns null (Lichess unavailable or
@@ -1277,7 +2066,8 @@ export async function generateStockfishFallbackLine(
   rep: Repertoire,
   yourMoveBudget: number,
   signal?: AbortSignal,
-  trace?: GenerationTrace
+  trace?: GenerationTrace,
+  start?: GenerationStart
 ): Promise<GeneratedLine | null> {
   const all = await getEdgesForRepertoire(rep.id);
   const byParent = new Map<NormFen, Edge[]>();
@@ -1287,11 +2077,11 @@ export async function generateStockfishFallbackLine(
     byParent.set(e.parentFen, arr);
   }
 
-  // DFS from root to find the longest path (deepest leaf).
-  let bestPath: Edge[] = [];
-  const stack: { fen: NormFen; path: Edge[] }[] = [{ fen: rep.rootFen, path: [] }];
+  // DFS from the requested generation root to find the longest path (deepest leaf).
+  let bestPath: Edge[] = start?.path ? [...start.path] : [];
+  const stack: { fen: NormFen; path: Edge[] }[] = [{ fen: start?.startFen ?? rep.rootFen, path: start?.path ? [...start.path] : [] }];
   const visited = new Set<NormFen>();
-  traceStep(trace, `Stockfish-only fallback: scanning ${all.length} stored edges for deepest leaf.`);
+  traceStep(trace, `Stockfish-only fallback: scanning ${all.length} stored edges for deepest leaf from ${start?.startFen ?? rep.rootFen}.`);
   while (stack.length) {
     const { fen, path } = stack.pop()!;
     if (visited.has(fen)) continue;
@@ -1351,7 +2141,7 @@ export async function generateStockfishFallbackLine(
       // Opponent move: try cloud eval, fall back to Lichess explorer.
       let bestUci: string | null = null;
       traceStep(trace, 'Stockfish-only fallback: requesting engine move for opponent.');
-      const engine = await fetchCloudEval(cursorFen, TUNING.cloudEvalMultiPv, signal);
+      const engine = await fetchCloudEval(cursorFen, TUNING.cloudEvalMultiPv, TUNING.engineDepthLineGen, signal);
       if (engine && engine.pvs.length > 0) {
         bestUci = engine.pvs[0].moves.split(' ')[0];
         traceStep(trace, `Stockfish-only fallback: engine opponent move ${bestUci}, depth=${engine.depth ?? 'unknown'}, pvs=${engine.pvs.length}.`);
@@ -1393,7 +2183,7 @@ export async function generateStockfishFallbackLine(
     throw new Error(failReason);
   }
   traceStep(trace, `Stockfish-only fallback: success. fullPath=${fullPath.length}, newEdges=${newEdges.length}, generationStartIndex=${generationStartIndex}.`);
-  return { fullPath, newEdges, generationStartIndex };
+  return { fullPath, newEdges, generationStartIndex, selectionReason: 'stockfish-fallback' };
 }
 
 export async function continueLearnLine(
@@ -1457,7 +2247,7 @@ export async function continueLearnLine(
     }
   }
 
-  return { fullPath, newEdges, generationStartIndex };
+  return { fullPath, newEdges, generationStartIndex, selectionReason: 'continue' };
 }
 
 function makeActiveSourceLine(pick: YourMovePick): ActiveSourceLine | null {
