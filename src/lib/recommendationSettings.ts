@@ -1,6 +1,9 @@
 import { getMeta, setMeta } from './storage';
 
 const META_RECOMMENDATION_SETTINGS = 'recommendation_settings_v1';
+const META_ALGORITHM_GLOBAL = 'algorithm_preferences_global_v1';
+const META_ALGORITHM_REPERTOIRE_PREFIX = 'algorithm_preferences_repertoire_v1:';
+const META_ALGORITHM_OPENING_PREFIX = 'algorithm_preferences_opening_v1:';
 
 export const PLAYER_CHOICES = [
   { key: 'self', name: 'My games' },
@@ -119,8 +122,32 @@ export const RECOMMENDATION_PACKS: RecommendationPack[] = [
 
 export interface RecommendationSettings {
   playerPriorities: Record<RecommendationSourceKey, number>;
-  playerBookMaxCpLoss: number;
   stealPaulMorphy?: boolean;
+}
+
+export type AlgorithmScope =
+  | { kind: 'global' }
+  | { kind: 'repertoire'; repertoireId: string }
+  | { kind: 'opening-folder'; repertoireId: string; openingKey: string };
+
+export type AlgorithmPreferenceItem =
+  | {
+      id: string;
+      type: 'source';
+      sourceKey: RecommendationSourceKey;
+      enabled: boolean;
+    }
+  | {
+      id: string;
+      type: 'pack';
+      packKey: RecommendationPackKey;
+      sourceKeys: RecommendationSourceKey[];
+      expanded?: boolean;
+      enabled: boolean;
+    };
+
+export interface AlgorithmPreferences {
+  items: AlgorithmPreferenceItem[];
 }
 
 const DEFAULT_PLAYER_PRIORITIES = {
@@ -130,7 +157,6 @@ const DEFAULT_PLAYER_PRIORITIES = {
 } as Record<RecommendationSourceKey, number>;
 
 export const DEFAULT_RECOMMENDATION_SETTINGS: RecommendationSettings = {
-  playerBookMaxCpLoss: 75,
   playerPriorities: DEFAULT_PLAYER_PRIORITIES,
 };
 
@@ -143,7 +169,6 @@ export async function getRecommendationSettings(): Promise<RecommendationSetting
       ...DEFAULT_RECOMMENDATION_SETTINGS.playerPriorities,
       ...(saved?.playerPriorities ?? {}),
     },
-    playerBookMaxCpLoss: saved?.playerBookMaxCpLoss ?? DEFAULT_RECOMMENDATION_SETTINGS.playerBookMaxCpLoss,
   };
   if (saved?.stealPaulMorphy && merged.playerPriorities.morphy === 0) {
     merged.playerPriorities.morphy = 1;
@@ -154,8 +179,91 @@ export async function getRecommendationSettings(): Promise<RecommendationSetting
 export async function setRecommendationSettings(settings: RecommendationSettings): Promise<void> {
   await setMeta(META_RECOMMENDATION_SETTINGS, {
     playerPriorities: settings.playerPriorities,
-    playerBookMaxCpLoss: settings.playerBookMaxCpLoss,
   });
+}
+
+export async function getAlgorithmPreferences(scope: AlgorithmScope): Promise<AlgorithmPreferences | undefined> {
+  const saved = await getMeta<AlgorithmPreferences>(algorithmMetaKey(scope));
+  if (saved) return normalizeAlgorithmPreferences(saved);
+  if (scope.kind !== 'global') return undefined;
+  return preferencesFromRecommendationSettings(await getRecommendationSettings());
+}
+
+export async function getResolvedAlgorithmPreferences(scope: AlgorithmScope): Promise<{ preferences: AlgorithmPreferences; inheritedFrom: AlgorithmScope }> {
+  const own = await getAlgorithmPreferences(scope);
+  if (own) return { preferences: own, inheritedFrom: scope };
+  if (scope.kind === 'opening-folder') {
+    const repScope: AlgorithmScope = { kind: 'repertoire', repertoireId: scope.repertoireId };
+    const rep = await getAlgorithmPreferences(repScope);
+    if (rep) return { preferences: rep, inheritedFrom: repScope };
+  }
+  const globalScope: AlgorithmScope = { kind: 'global' };
+  return { preferences: (await getAlgorithmPreferences(globalScope))!, inheritedFrom: globalScope };
+}
+
+export async function setAlgorithmPreferences(scope: AlgorithmScope, preferences: AlgorithmPreferences): Promise<void> {
+  const normalized = normalizeAlgorithmPreferences(preferences);
+  await setMeta(algorithmMetaKey(scope), normalized);
+  if (scope.kind === 'global') {
+    await setRecommendationSettings(recommendationSettingsFromAlgorithmPreferences(normalized));
+  }
+}
+
+export async function clearAlgorithmPreferences(scope: AlgorithmScope): Promise<void> {
+  await setMeta(algorithmMetaKey(scope), undefined);
+}
+
+export function preferencesFromRecommendationSettings(settings: RecommendationSettings): AlgorithmPreferences {
+  return {
+    items: getEnabledRecommendationOrder(settings).map(source => ({
+      id: sourceItemId(source.key),
+      type: 'source' as const,
+      sourceKey: source.key,
+      enabled: true,
+    })),
+  };
+}
+
+export function recommendationSettingsFromAlgorithmPreferences(preferences: AlgorithmPreferences): RecommendationSettings {
+  return {
+    playerPriorities: prioritiesFromSources(flattenAlgorithmSourceOrder(preferences)),
+  };
+}
+
+export function flattenAlgorithmSourceOrder(preferences: AlgorithmPreferences): RecommendationSourceKey[] {
+  const topLevelSources = new Set(
+    preferences.items
+      .filter((item): item is Extract<AlgorithmPreferenceItem, { type: 'source' }> => item.type === 'source' && item.enabled)
+      .map(item => item.sourceKey)
+  );
+  const ordered: RecommendationSourceKey[] = [];
+  const seen = new Set<RecommendationSourceKey>();
+
+  for (const item of preferences.items) {
+    if (!item.enabled) continue;
+    if (item.type === 'source') {
+      if (!seen.has(item.sourceKey)) {
+        ordered.push(item.sourceKey);
+        seen.add(item.sourceKey);
+      }
+      continue;
+    }
+    for (const sourceKey of item.sourceKeys) {
+      if (topLevelSources.has(sourceKey) || seen.has(sourceKey)) continue;
+      ordered.push(sourceKey);
+      seen.add(sourceKey);
+    }
+  }
+  return ordered;
+}
+
+export function extractedSourcesForPack(preferences: AlgorithmPreferences, packItem: Extract<AlgorithmPreferenceItem, { type: 'pack' }>): RecommendationSourceKey[] {
+  const topLevelSources = new Set(
+    preferences.items
+      .filter((item): item is Extract<AlgorithmPreferenceItem, { type: 'source' }> => item.type === 'source')
+      .map(item => item.sourceKey)
+  );
+  return packItem.sourceKeys.filter(sourceKey => topLevelSources.has(sourceKey));
 }
 
 export function prioritiesFromSources(sources: RecommendationSourceKey[]): RecommendationSettings['playerPriorities'] {
@@ -177,4 +285,42 @@ export function getEnabledRecommendationOrder(settings: RecommendationSettings):
   return RECOMMENDATION_CHOICES
     .filter(source => settings.playerPriorities[source.key] > 0)
     .sort((a, b) => settings.playerPriorities[a.key] - settings.playerPriorities[b.key]);
+}
+
+function algorithmMetaKey(scope: AlgorithmScope): string {
+  if (scope.kind === 'global') return META_ALGORITHM_GLOBAL;
+  if (scope.kind === 'repertoire') return `${META_ALGORITHM_REPERTOIRE_PREFIX}${scope.repertoireId}`;
+  return `${META_ALGORITHM_OPENING_PREFIX}${scope.repertoireId}:${scope.openingKey}`;
+}
+
+function normalizeAlgorithmPreferences(preferences: AlgorithmPreferences): AlgorithmPreferences {
+  return {
+    items: (preferences.items ?? []).map(item => {
+      if (item.type === 'source') {
+        return {
+          id: item.id || sourceItemId(item.sourceKey),
+          type: 'source' as const,
+          sourceKey: item.sourceKey,
+          enabled: item.enabled !== false,
+        };
+      }
+      const pack = RECOMMENDATION_PACKS.find(candidate => candidate.key === item.packKey);
+      return {
+        id: item.id || packItemId(item.packKey),
+        type: 'pack' as const,
+        packKey: item.packKey,
+        sourceKeys: item.sourceKeys?.length ? item.sourceKeys : (pack?.sources ?? []),
+        expanded: item.expanded ?? false,
+        enabled: item.enabled !== false,
+      };
+    }).filter(item => item.type === 'pack' || RECOMMENDATION_CHOICES.some(source => source.key === item.sourceKey)),
+  };
+}
+
+function sourceItemId(sourceKey: RecommendationSourceKey): string {
+  return `source:${sourceKey}`;
+}
+
+function packItemId(packKey: RecommendationPackKey): string {
+  return `pack:${packKey}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 6)}`;
 }

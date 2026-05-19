@@ -86,6 +86,19 @@ interface TreeNode {
   children: Map<string, TreeNode>;
 }
 
+interface FenMoveStat {
+  uci: string;
+  san: string;
+  games: number;
+  childFen: NormFen;
+}
+
+interface PlayerDecisionCache {
+  kind: 'kept' | 'replaced';
+  chosenUci: string;
+  chosenSan: string;
+}
+
 const MAX_PLIES_AFTER_ROOT = 18;
 const MAX_PLAYER_DECISIONS_PER_ROOT = 6;
 const MAX_PLAYER_CANDIDATES = 4;
@@ -114,6 +127,8 @@ export async function buildImportDraft(options: ImportOptions): Promise<ImportDr
     if (rootGames.length === 0) continue;
     gamesMatched += rootGames.length;
     const tree = buildRootTree(rootGames, opening);
+    const fenMoveStats = buildFenMoveStats(rootGames);
+    const playerDecisionsByFen = new Map<NormFen, PlayerDecisionCache>();
     const decisions: ImportDecision[] = [];
     const lines = await synthesizeLines({
       opening,
@@ -122,6 +137,8 @@ export async function buildImportDraft(options: ImportOptions): Promise<ImportDr
       decisions,
       cpLossThreshold: options.cpLossThreshold,
       playerDecisionCount: 0,
+      fenMoveStats,
+      playerDecisionsByFen,
       signal: options.signal,
     });
     roots.push({
@@ -301,6 +318,25 @@ function findGamesAtRoot(games: ParsedImportGame[], opening: CuratedOpening): Ro
   return result;
 }
 
+function buildFenMoveStats(rootGames: RootGame[]): Map<NormFen, FenMoveStat[]> {
+  const acc = new Map<NormFen, Map<string, FenMoveStat>>();
+  for (const item of rootGames) {
+    const continuation = item.game.moves.slice(item.startIndex + 1, item.startIndex + 1 + MAX_PLIES_AFTER_ROOT);
+    for (const move of continuation) {
+      let perPos = acc.get(move.before);
+      if (!perPos) { perPos = new Map(); acc.set(move.before, perPos); }
+      const existing = perPos.get(move.uci);
+      if (existing) existing.games++;
+      else perPos.set(move.uci, { uci: move.uci, san: move.san, games: 1, childFen: move.after });
+    }
+  }
+  const result = new Map<NormFen, FenMoveStat[]>();
+  for (const [fen, moves] of acc) {
+    result.set(fen, [...moves.values()].sort((a, b) => b.games - a.games));
+  }
+  return result;
+}
+
 function buildRootTree(rootGames: RootGame[], opening: CuratedOpening): TreeNode {
   const root: TreeNode = { fen: openingFen(opening), incoming: null, games: rootGames.length, children: new Map() };
   for (const item of rootGames) {
@@ -326,6 +362,8 @@ async function synthesizeLines(input: {
   decisions: ImportDecision[];
   cpLossThreshold: number;
   playerDecisionCount: number;
+  fenMoveStats: Map<NormFen, FenMoveStat[]>;
+  playerDecisionsByFen: Map<NormFen, PlayerDecisionCache>;
   signal?: AbortSignal;
 }): Promise<string[][]> {
   if (input.signal?.aborted) return [];
@@ -333,14 +371,21 @@ async function synthesizeLines(input: {
 
   const turn = turnAt(input.node.fen);
   if (turn === input.opening.color) {
-    const choice = await choosePlayerContinuation(input.opening, input.node, input.cpLossThreshold, input.signal);
-    if (!choice) return [input.path];
-    input.decisions.push(choice.decision);
-    const nextPath = [...input.path, choice.decision.chosenSan];
-    if (choice.kind === 'replaced' || !choice.child) return [nextPath];
+    let cached = input.playerDecisionsByFen.get(input.node.fen);
+    if (!cached) {
+      const choice = await choosePlayerContinuation(input.opening, input.node, input.cpLossThreshold, input.fenMoveStats, input.signal);
+      if (!choice) return [input.path];
+      input.decisions.push(choice.decision);
+      cached = { kind: choice.kind, chosenUci: choice.decision.chosenUci, chosenSan: choice.decision.chosenSan };
+      input.playerDecisionsByFen.set(input.node.fen, cached);
+    }
+    const nextPath = [...input.path, cached.chosenSan];
+    if (cached.kind === 'replaced') return [nextPath];
+    const chosenChild = input.node.children.get(cached.chosenUci);
+    if (!chosenChild) return [nextPath];
     return synthesizeLines({
       ...input,
-      node: choice.child,
+      node: chosenChild,
       path: nextPath,
       playerDecisionCount: input.playerDecisionCount + 1,
     });
@@ -365,67 +410,62 @@ async function choosePlayerContinuation(
   opening: CuratedOpening,
   node: TreeNode,
   cpLossThreshold: number,
+  fenMoveStats: Map<NormFen, FenMoveStat[]>,
   signal?: AbortSignal
-): Promise<{ kind: 'kept' | 'replaced'; child: TreeNode | null; decision: ImportDecision } | null> {
-  const candidates = [...node.children.values()]
-    .filter(child => child.incoming)
-    .sort((a, b) => b.games - a.games)
-    .slice(0, MAX_PLAYER_CANDIDATES);
+): Promise<{ kind: 'kept' | 'replaced'; decision: ImportDecision } | null> {
+  const candidates = (fenMoveStats.get(node.fen) ?? []).slice(0, MAX_PLAYER_CANDIDATES);
   if (candidates.length === 0) return null;
 
   const qualities = [];
-  for (const child of candidates) {
-    if (!child.incoming) continue;
+  for (const candidate of candidates) {
     qualities.push({
-      child,
-      quality: await evaluateCandidate(node.fen, child.incoming.uci, opening.color, cpLossThreshold, signal),
+      candidate,
+      quality: await evaluateCandidate(node.fen, candidate.uci, opening.color, cpLossThreshold, signal),
     });
   }
 
   const acceptable = qualities.filter(item => item.quality.acceptable);
   if (acceptable.length > 0) {
-    acceptable.sort((a, b) => b.child.games - a.child.games || b.quality.score - a.quality.score);
+    acceptable.sort((a, b) => b.candidate.games - a.candidate.games || b.quality.score - a.quality.score);
     const winner = acceptable[0];
-    const move = winner.child.incoming!;
+    const candidate = winner.candidate;
     return {
       kind: 'kept',
-      child: winner.child,
       decision: {
-        id: `${opening.key}-${node.fen}-${move.uci}`,
+        id: `${opening.key}-${node.fen}-${candidate.uci}`,
         openingKey: opening.key,
         ply: pathPly(opening.moves, node.fen),
         fen: node.fen,
         kind: 'kept',
-        playedSan: move.san,
-        playedUci: move.uci,
-        chosenSan: move.san,
-        chosenUci: move.uci,
-        games: winner.child.games,
+        playedSan: candidate.san,
+        playedUci: candidate.uci,
+        chosenSan: candidate.san,
+        chosenUci: candidate.uci,
+        games: candidate.games,
         masterGames: winner.quality.masterGames,
         cpLoss: winner.quality.cpLoss,
-        reason: keepReason(winner.quality, winner.child.games),
+        reason: keepReason(winner.quality, candidate.games),
       },
     };
   }
 
   const mostCommon = qualities[0];
-  const played = mostCommon.child.incoming!;
+  const candidate = mostCommon.candidate;
   const replacement = await chooseReplacement(node.fen, opening.color, signal);
   if (!replacement) {
     return {
       kind: 'kept',
-      child: mostCommon.child,
       decision: {
-        id: `${opening.key}-${node.fen}-${played.uci}`,
+        id: `${opening.key}-${node.fen}-${candidate.uci}`,
         openingKey: opening.key,
         ply: pathPly(opening.moves, node.fen),
         fen: node.fen,
         kind: 'kept',
-        playedSan: played.san,
-        playedUci: played.uci,
-        chosenSan: played.san,
-        chosenUci: played.uci,
-        games: mostCommon.child.games,
+        playedSan: candidate.san,
+        playedUci: candidate.uci,
+        chosenSan: candidate.san,
+        chosenUci: candidate.uci,
+        games: candidate.games,
         masterGames: mostCommon.quality.masterGames,
         cpLoss: mostCommon.quality.cpLoss,
         reason: 'Kept because Chesski could not find a safe replacement from masters or engine data.',
@@ -435,18 +475,17 @@ async function choosePlayerContinuation(
 
   return {
     kind: 'replaced',
-    child: null,
     decision: {
-      id: `${opening.key}-${node.fen}-${played.uci}-replacement`,
+      id: `${opening.key}-${node.fen}-${candidate.uci}-replacement`,
       openingKey: opening.key,
       ply: pathPly(opening.moves, node.fen),
       fen: node.fen,
       kind: 'replaced',
-      playedSan: played.san,
-      playedUci: played.uci,
+      playedSan: candidate.san,
+      playedUci: candidate.uci,
       chosenSan: replacement.san,
       chosenUci: replacement.uci,
-      games: mostCommon.child.games,
+      games: candidate.games,
       masterGames: mostCommon.quality.masterGames,
       cpLoss: mostCommon.quality.cpLoss,
       reason: replacement.reason,
@@ -504,6 +543,161 @@ async function chooseReplacement(fen: NormFen, color: Color, signal?: AbortSigna
     uci: legal.lan,
     reason: `Chesski's algorithm prefers this continuation because the original move failed the filters and no master or engine replacement was available.`,
   };
+}
+
+export interface ConflictMoveStats {
+  uci: string;
+  san: string;
+  cpLoss: number | null;
+  masterGames: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  acceptable: boolean;
+}
+
+export interface ConflictResolution {
+  /** 'existing' = keep the move already in the repertoire; 'new' = swap to the new move; 'modal' = ask user. */
+  decision: 'existing' | 'new' | 'modal';
+  reason: string;
+  algorithmPickSan: string | null;
+  existingStats: ConflictMoveStats;
+  newStats: ConflictMoveStats;
+}
+
+const CONFLICT_MIN_MASTER_GAMES = 10;
+
+/**
+ * Resolves a conflict between two player moves at the same FEN.
+ * Walks master moves by frequency, picks the first one passing engine + 10+ games + W>L for the player.
+ * If the algorithm's pick matches one of the two user moves, that move wins automatically.
+ * Otherwise, if both user moves are acceptable, returns 'modal'.
+ */
+export async function resolvePlayerConflict(
+  fen: NormFen,
+  color: Color,
+  existingUci: string,
+  newUci: string,
+  cpLossThreshold: number,
+  signal?: AbortSignal
+): Promise<ConflictResolution> {
+  const masters = await fetchMastersSafe(fen, signal);
+  const masterMoves = masters?.moves
+    .slice()
+    .sort((a, b) => moveGames(b) - moveGames(a)) ?? [];
+
+  // Find algorithm pick by walking master moves
+  let algorithmPickUci: string | null = null;
+  let algorithmPickSan: string | null = null;
+  for (const m of masterMoves) {
+    const games = moveGames(m);
+    if (games < CONFLICT_MIN_MASTER_GAMES) continue;
+    const wins = color === 'w' ? m.white : m.black;
+    const losses = color === 'w' ? m.black : m.white;
+    if (wins <= losses) continue;
+    const engine = await evaluateMoveCpLoss(fen, m.uci, signal);
+    const cpLoss = engine.cpLoss;
+    if (cpLoss === null || cpLoss > cpLossThreshold) continue;
+    algorithmPickUci = m.uci;
+    algorithmPickSan = m.san;
+    break;
+  }
+
+  // Build stats for both user moves
+  const existingStats = await buildConflictStats(fen, color, existingUci, cpLossThreshold, masters, signal);
+  const newStats = await buildConflictStats(fen, color, newUci, cpLossThreshold, masters, signal);
+
+  if (algorithmPickUci === existingUci) {
+    return {
+      decision: 'existing',
+      reason: `${existingStats.san} is the master-recommended move at this position (top master pick passing engine + ${CONFLICT_MIN_MASTER_GAMES}+ games + W>L).`,
+      algorithmPickSan,
+      existingStats,
+      newStats,
+    };
+  }
+  if (algorithmPickUci === newUci) {
+    return {
+      decision: 'new',
+      reason: `${newStats.san} is the master-recommended move at this position (top master pick passing engine + ${CONFLICT_MIN_MASTER_GAMES}+ games + W>L).`,
+      algorithmPickSan,
+      existingStats,
+      newStats,
+    };
+  }
+
+  // Algorithm pick is neither user move (or none found)
+  if (existingStats.acceptable && newStats.acceptable) {
+    return {
+      decision: 'modal',
+      reason: 'Both moves are acceptable and neither matches the algorithm pick — user input required.',
+      algorithmPickSan,
+      existingStats,
+      newStats,
+    };
+  }
+  if (existingStats.acceptable) {
+    return {
+      decision: 'existing',
+      reason: `${newStats.san} fails the engine/master filters; keeping ${existingStats.san}.`,
+      algorithmPickSan,
+      existingStats,
+      newStats,
+    };
+  }
+  if (newStats.acceptable) {
+    return {
+      decision: 'new',
+      reason: `${existingStats.san} fails the engine/master filters; switching to ${newStats.san}.`,
+      algorithmPickSan,
+      existingStats,
+      newStats,
+    };
+  }
+  return {
+    decision: 'modal',
+    reason: 'Neither move passes the filters cleanly — user input required.',
+    algorithmPickSan,
+    existingStats,
+    newStats,
+  };
+}
+
+async function buildConflictStats(
+  fen: NormFen,
+  color: Color,
+  uci: string,
+  cpLossThreshold: number,
+  masters: LichessExplorerResponse | null,
+  signal?: AbortSignal
+): Promise<ConflictMoveStats> {
+  const masterMove = masters?.moves.find(m => m.uci === uci) ?? null;
+  const masterGames = masterMove ? moveGames(masterMove) : 0;
+  const wins = masterMove ? (color === 'w' ? masterMove.white : masterMove.black) : 0;
+  const losses = masterMove ? (color === 'w' ? masterMove.black : masterMove.white) : 0;
+  const draws = masterMove ? masterMove.draws : 0;
+  const engine = await evaluateMoveCpLoss(fen, uci, signal);
+  const cpLoss = engine.cpLoss;
+  const masterTotal = masters ? totalGames(masters) : 0;
+  const noMasterPosition = masterTotal === 0;
+  const acceptable = noMasterPosition
+    ? cpLoss !== null && cpLoss <= NO_MASTER_CP_THRESHOLD
+    : masterGames > 0 && (cpLoss === null || cpLoss <= cpLossThreshold);
+  const san = masterMove?.san ?? uciToSan(fen, uci) ?? uci;
+  return { uci, san, cpLoss, masterGames, wins, draws, losses, acceptable };
+}
+
+function uciToSan(fen: NormFen, uci: string): string | null {
+  try {
+    const chess = new Chess(`${fen} 0 1`);
+    const from = uci.slice(0, 2);
+    const to = uci.slice(2, 4);
+    const promotion = uci.length > 4 ? uci[4] : undefined;
+    const move = chess.move({ from, to, promotion });
+    return move?.san ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function chooseOpponentBranches(node: TreeNode): TreeNode[] {

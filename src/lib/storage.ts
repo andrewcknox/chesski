@@ -1,10 +1,11 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import { Chess } from 'chess.js';
-import type { Color, Edge, FrontierCandidate, FrontierStatus, NormFen, PositionNode, Repertoire } from '../types';
-import { edgeId, newId } from '../types';
+import type { Color, Edge, FrontierCandidate, FrontierStatus, NormFen, PositionNode, ReadyLine, Repertoire } from '../types';
+import { edgeId, frontierId, newId } from '../types';
 import { applyMove, computeOpeningFen, normalizeFen, STARTING_FEN_NORM } from './chess';
 import { freshSrsState } from './srs';
 import { CURATED_OPENINGS, findOpening, type ResolvedOpeningLine } from './openings';
+import { prepareOpeningLineForRepertoire, validateOpeningColor } from './openingRoots';
 
 interface ChessTrainerDB extends DBSchema {
   repertoires: {
@@ -38,12 +39,21 @@ interface ChessTrainerDB extends DBSchema {
       'by-rep-child': [string, string];
     };
   };
+  readyLines: {
+    key: string;
+    value: ReadyLine;
+    indexes: {
+      'by-repertoire': string;
+      'by-rep-scope': [string, string];
+    };
+  };
 }
 
 const DB_NAME = 'chess-trainer';
 // Version 2: per-repertoire edge model. Bumping wipes old (incompatible) data.
 // Version 3: local frontier queue. Existing v2 data is preserved.
-const DB_VERSION = 3;
+// Version 4: pre-built training-line cache. Existing v3 data is preserved.
+const DB_VERSION = 4;
 
 let _dbPromise: Promise<IDBPDatabase<ChessTrainerDB>> | null = null;
 
@@ -80,6 +90,11 @@ export function getDB(): Promise<IDBPDatabase<ChessTrainerDB>> {
         frontiers.createIndex('by-rep-status', ['repertoireId', 'status']);
         frontiers.createIndex('by-rep-child', ['repertoireId', 'childFen']);
       }
+      if (!db.objectStoreNames.contains('readyLines')) {
+        const readyLines = db.createObjectStore('readyLines', { keyPath: 'id' });
+        readyLines.createIndex('by-repertoire', 'repertoireId');
+        readyLines.createIndex('by-rep-scope', ['repertoireId', 'scopeKey']);
+      }
     },
   });
   return _dbPromise;
@@ -99,7 +114,7 @@ export async function getRepertoire(id: string): Promise<Repertoire | undefined>
   return db.get('repertoires', id);
 }
 
-export async function updateRepertoire(id: string, patch: Partial<Pick<Repertoire, 'name' | 'folderId' | 'projectKind'>>): Promise<Repertoire> {
+export async function updateRepertoire(id: string, patch: Partial<Pick<Repertoire, 'name' | 'folderId' | 'projectKind' | 'archived'>>): Promise<Repertoire> {
   const db = await getDB();
   const existing = await db.get('repertoires', id);
   if (!existing) throw new Error('Could not find that repertoire.');
@@ -115,7 +130,7 @@ export async function updateRepertoire(id: string, patch: Partial<Pick<Repertoir
 
 export async function deleteRepertoire(id: string): Promise<void> {
   const db = await getDB();
-  const tx = db.transaction(['repertoires', 'edges', 'frontiers'], 'readwrite');
+  const tx = db.transaction(['repertoires', 'edges', 'frontiers', 'readyLines'], 'readwrite');
   await tx.objectStore('repertoires').delete(id);
   // Delete all edges scoped to this repertoire.
   const edgeStore = tx.objectStore('edges');
@@ -131,6 +146,13 @@ export async function deleteRepertoire(id: string): Promise<void> {
   while (frontierCur) {
     await frontierCur.delete();
     frontierCur = await frontierCur.continue();
+  }
+  const readyStore = tx.objectStore('readyLines');
+  const readyIdx = readyStore.index('by-repertoire');
+  let readyCur = await readyIdx.openCursor(IDBKeyRange.only(id));
+  while (readyCur) {
+    await readyCur.delete();
+    readyCur = await readyCur.continue();
   }
   await tx.done;
   // Note: shared PositionNodes are not garbage-collected here — they're cheap and may be
@@ -163,6 +185,18 @@ export async function ensureDefaultMainRepertoires(): Promise<Repertoire[]> {
   return created;
 }
 
+export async function ensureSideMainRepertoire(color: Color): Promise<Repertoire> {
+  const name = color === 'w' ? 'White Main Repertoire' : 'Black Main Repertoire';
+  const reps = await listRepertoires();
+  const exact = reps.find(rep => rep.color === color && rep.name === name);
+  if (exact) {
+    const patch: Partial<Pick<Repertoire, 'name' | 'folderId' | 'projectKind'>> = {};
+    if ((exact.projectKind ?? 'standard') !== 'standard') patch.projectKind = 'standard';
+    return Object.keys(patch).length > 0 ? updateRepertoire(exact.id, patch) : exact;
+  }
+  return createRepertoire({ name, color, projectKind: 'standard' });
+}
+
 export async function createRepertoire(options: CreateRepertoireOptions): Promise<Repertoire> {
   const db = await getDB();
   const now = new Date().toISOString();
@@ -192,8 +226,8 @@ export async function createRepertoireFromOpening(opening: ResolvedOpeningLine):
     name: opening.name,
     color: opening.color,
     openingKey: opening.key,
-    rootFen: computeOpeningFen(opening.moves),
-    // Root IS the opening position — no scaffold moves needed.
+    moves: opening.moves,
+    scaffoldPlyCount: opening.moves.length,
   });
 }
 
@@ -214,10 +248,9 @@ export async function addOpeningToRepertoire(repertoireId: string, openingKey: s
   if (!opening) throw new Error(`Unknown opening: ${openingKey}`);
   const rep = await getRepertoire(repertoireId);
   if (!rep) throw new Error('Could not find that repertoire.');
-  if (rep.color !== opening.color) {
-    throw new Error(`${opening.name} is a ${opening.color === 'w' ? 'White' : 'Black'} opening. Add it to a ${opening.color === 'w' ? 'White' : 'Black'} repertoire.`);
-  }
-  const result = await addMovesToRepertoire(rep, opening.moves, { scaffoldPlyCount: opening.moves.length });
+  validateOpeningColor(rep.color, opening);
+  const prepared = prepareOpeningLineForRepertoire(rep, opening, opening.moves);
+  const result = await addMovesToRepertoire(rep, prepared.moves, { scaffoldPlyCount: prepared.scaffoldPlyCount });
   await markCuratedOpeningScaffolds(rep);
   return result;
 }
@@ -337,6 +370,11 @@ export async function getEdgesForRepertoire(repertoireId: string): Promise<Edge[
   return db.getAllFromIndex('edges', 'by-repertoire', repertoireId);
 }
 
+export async function getEdgeById(id: string): Promise<Edge | undefined> {
+  const db = await getDB();
+  return db.get('edges', id);
+}
+
 export async function getEdge(repertoireId: string, parentFen: NormFen, childFen: NormFen): Promise<Edge | undefined> {
   const db = await getDB();
   return db.get('edges', edgeId(repertoireId, parentFen, childFen));
@@ -365,10 +403,12 @@ export async function putEdge(edge: Edge): Promise<void> {
 
 // ---------- Frontier Queue ----------
 
+// Frontier retrieval order: rank by `games` (real-world response volume at the
+// frontier position). `weight` is retained on each candidate for display only
+// and must not influence selection — see lib/autosuggest.ts and docs/line-selection.md.
 function sortFrontiers(frontiers: FrontierCandidate[]): FrontierCandidate[] {
   return [...frontiers].sort((a, b) => (
-    (b.weight - a.weight)
-    || (b.games - a.games)
+    (b.games - a.games)
     || b.updatedAt.localeCompare(a.updatedAt)
   ));
 }
@@ -379,10 +419,15 @@ export async function getFrontiersForRepertoire(repertoireId: string): Promise<F
   return sortFrontiers(frontiers);
 }
 
-export async function getOpenFrontiers(repertoireId: string): Promise<FrontierCandidate[]> {
+function frontierMatchesScope(frontier: FrontierCandidate, scopeKey?: string): boolean {
+  if (!scopeKey) return !frontier.scopeKey || frontier.scopeKey === 'root';
+  return frontier.scopeKey === scopeKey;
+}
+
+export async function getOpenFrontiers(repertoireId: string, scopeKey?: string): Promise<FrontierCandidate[]> {
   const db = await getDB();
   const frontiers = await db.getAllFromIndex('frontiers', 'by-rep-status', [repertoireId, 'open']);
-  return sortFrontiers(frontiers);
+  return sortFrontiers(frontiers.filter(frontier => frontierMatchesScope(frontier, scopeKey)));
 }
 
 export async function putFrontiers(frontiers: FrontierCandidate[]): Promise<void> {
@@ -391,11 +436,19 @@ export async function putFrontiers(frontiers: FrontierCandidate[]): Promise<void
   const tx = db.transaction('frontiers', 'readwrite');
   for (const frontier of frontiers) {
     const existing = await tx.store.get(frontier.id);
+    // Preserve any existing non-'open' status when a candidate is rediscovered
+    // by the frontier search. The search always emits new candidates with
+    // status='open'; without this guard, an answered frontier (already used by
+    // a generated line) gets silently re-opened on rebuild, causing the line
+    // generator to pick the same frontier again and produce a duplicate line.
+    // Same applies to 'blocked' and 'stale'. Discovered 2026-05 after the
+    // blocked-frontier mechanism was removed surfaced this latent regression.
+    const keepExisting = existing && existing.status !== 'open';
     await tx.store.put({
       ...frontier,
       createdAt: existing?.createdAt ?? frontier.createdAt,
-      status: existing?.status === 'blocked' ? existing.status : frontier.status,
-      lastReason: existing?.status === 'blocked' ? existing.lastReason : frontier.lastReason,
+      status: keepExisting ? existing.status : frontier.status,
+      lastReason: keepExisting ? existing.lastReason : frontier.lastReason,
     });
   }
   await tx.done;
@@ -441,16 +494,96 @@ export async function markFrontierBlocked(frontierId: string, reason: string): P
   });
 }
 
-export async function clearFrontiersForRepertoire(repertoireId: string): Promise<void> {
+// Auto-clean for the line-generation entry path. The blocked-frontier mechanism
+// (whereby a quality-gate rejection marked the offending frontier 'blocked' so
+// retries skipped it) has been removed — see generateLearnLine. This helper
+// exists so that any historical 'blocked' rows from prior runs are returned to
+// 'open' on the next generation, allowing the user's repertoire to self-heal
+// across the version transition. Not exported to the UI; only used internally.
+export async function clearBlockedFrontiersForRepertoire(repertoireId: string): Promise<number> {
+  const db = await getDB();
+  const matches = await db.getAllFromIndex('frontiers', 'by-rep-status', [repertoireId, 'blocked']);
+  if (matches.length === 0) return 0;
+  const tx = db.transaction('frontiers', 'readwrite');
+  const now = new Date().toISOString();
+  for (const frontier of matches) {
+    await tx.store.put({ ...frontier, status: 'open', lastReason: undefined, updatedAt: now });
+  }
+  await tx.done;
+  return matches.length;
+}
+
+export async function clearFrontiersForRepertoire(repertoireId: string, scopeKey?: string): Promise<void> {
   const db = await getDB();
   const tx = db.transaction('frontiers', 'readwrite');
   const idx = tx.store.index('by-repertoire');
   let cur = await idx.openCursor(IDBKeyRange.only(repertoireId));
   while (cur) {
-    await cur.delete();
+    if (scopeKey === undefined || frontierMatchesScope(cur.value, scopeKey)) await cur.delete();
     cur = await cur.continue();
   }
   await tx.done;
+}
+
+export interface GenerationStateSnapshot {
+  edges: Edge[];
+  frontiers: FrontierCandidate[];
+}
+
+export interface GenerationStateRestoreResult {
+  deletedEdges: number;
+  restoredEdges: number;
+  deletedFrontiers: number;
+  restoredFrontiers: number;
+}
+
+export async function snapshotGenerationState(repertoireId: string): Promise<GenerationStateSnapshot> {
+  const db = await getDB();
+  const [edges, frontiers] = await Promise.all([
+    db.getAllFromIndex('edges', 'by-repertoire', repertoireId),
+    db.getAllFromIndex('frontiers', 'by-repertoire', repertoireId),
+  ]);
+  return { edges, frontiers };
+}
+
+export async function restoreGenerationState(
+  repertoireId: string,
+  snapshot: GenerationStateSnapshot,
+): Promise<GenerationStateRestoreResult> {
+  const db = await getDB();
+  const tx = db.transaction(['edges', 'frontiers'], 'readwrite');
+  const edgeStore = tx.objectStore('edges');
+  const frontierStore = tx.objectStore('frontiers');
+
+  const snapshotEdgeIds = new Set(snapshot.edges.map(edge => edge.id));
+  const currentEdges = await edgeStore.index('by-repertoire').getAll(repertoireId);
+  let deletedEdges = 0;
+  for (const edge of currentEdges) {
+    if (!snapshotEdgeIds.has(edge.id)) {
+      await edgeStore.delete(edge.id);
+      deletedEdges++;
+    }
+  }
+  for (const edge of snapshot.edges) await edgeStore.put(edge);
+
+  const snapshotFrontierIds = new Set(snapshot.frontiers.map(frontier => frontier.id));
+  const currentFrontiers = await frontierStore.index('by-repertoire').getAll(repertoireId);
+  let deletedFrontiers = 0;
+  for (const frontier of currentFrontiers) {
+    if (!snapshotFrontierIds.has(frontier.id)) {
+      await frontierStore.delete(frontier.id);
+      deletedFrontiers++;
+    }
+  }
+  for (const frontier of snapshot.frontiers) await frontierStore.put(frontier);
+
+  await tx.done;
+  return {
+    deletedEdges,
+    restoredEdges: snapshot.edges.length,
+    deletedFrontiers,
+    restoredFrontiers: snapshot.frontiers.length,
+  };
 }
 
 export interface PlayMoveResult {
@@ -549,7 +682,43 @@ export async function deleteSubtreeInRepertoire(repertoireId: string, fen: NormF
     }
   }
   await tx.done;
+  if (edgesDeleted > 0) await clearFrontiersForRepertoire(repertoireId);
   return { edgesDeleted };
+}
+
+export async function deleteOpeningFolderInRepertoire(repertoireId: string, baseFen: NormFen, incomingEdgeId?: string | null): Promise<{ edgesDeleted: number }> {
+  const db = await getDB();
+  const repEdges = await db.getAllFromIndex('edges', 'by-repertoire', repertoireId);
+  const byParent = new Map<NormFen, Edge[]>();
+  for (const edge of repEdges) {
+    const current = byParent.get(edge.parentFen) ?? [];
+    current.push(edge);
+    byParent.set(edge.parentFen, current);
+  }
+
+  const reachable = new Set<NormFen>([baseFen]);
+  const queue: NormFen[] = [baseFen];
+  while (queue.length) {
+    const fen = queue.shift()!;
+    for (const edge of byParent.get(fen) ?? []) {
+      if (reachable.has(edge.childFen)) continue;
+      reachable.add(edge.childFen);
+      queue.push(edge.childFen);
+    }
+  }
+
+  const toDelete = new Set<string>();
+  for (const edge of repEdges) {
+    if (reachable.has(edge.parentFen)) toDelete.add(edge.id);
+  }
+  if (incomingEdgeId) toDelete.add(incomingEdgeId);
+
+  if (toDelete.size === 0) return { edgesDeleted: 0 };
+  const tx = db.transaction('edges', 'readwrite');
+  for (const id of toDelete) await tx.store.delete(id);
+  await tx.done;
+  await clearFrontiersForRepertoire(repertoireId);
+  return { edgesDeleted: toDelete.size };
 }
 
 // Replace an existing your-move at parentFen with a different attempted move.
@@ -584,6 +753,111 @@ export async function resetAllSrsForRepertoire(repertoireId: string): Promise<nu
   }
   await tx.done;
   return n;
+}
+
+// One-time consolidation for old data where curated openings were saved as
+// top-level standard repertoires. Learned lines are copied into the color's main
+// repertoire; intentionally separate/siloed repertoires remain as extra entries.
+export async function consolidateLegacyOpeningRepertoires(): Promise<{ migratedRepertoires: number; copiedEdges: number; removedRepertoires: number }> {
+  const db = await getDB();
+  const reps = await listRepertoires();
+  const legacySources = reps.filter(rep => isLegacyOpeningRepertoire(rep));
+  if (legacySources.length === 0) return { migratedRepertoires: 0, copiedEdges: 0, removedRepertoires: 0 };
+
+  const whiteMain = await ensureSideMainRepertoire('w');
+  const blackMain = await ensureSideMainRepertoire('b');
+  const targetByColor: Record<Color, Repertoire> = { w: whiteMain, b: blackMain };
+  let copiedEdges = 0;
+  let removedRepertoires = 0;
+
+  for (const source of legacySources) {
+    const target = targetByColor[source.color];
+    if (source.id === target.id) continue;
+    const sourceEdges = await db.getAllFromIndex('edges', 'by-repertoire', source.id);
+    const sourceFrontiers = await db.getAllFromIndex('frontiers', 'by-repertoire', source.id);
+    const tx = db.transaction(['edges', 'frontiers', 'repertoires'], 'readwrite');
+    const edgeStore = tx.objectStore('edges');
+    const frontierStore = tx.objectStore('frontiers');
+
+    for (const edge of sourceEdges) {
+      const migrated: Edge = {
+        ...edge,
+        id: edgeId(target.id, edge.parentFen, edge.childFen),
+        repertoireId: target.id,
+      };
+      const existing = await edgeStore.get(migrated.id);
+      await edgeStore.put(existing ? mergeMigratedEdge(existing, migrated, target.color) : migrated);
+      copiedEdges++;
+    }
+
+    for (const frontier of sourceFrontiers) {
+      const id = frontierId(target.id, frontier.parentFen, frontier.uci);
+      const existing = await frontierStore.get(id);
+      if (!existing) {
+        await frontierStore.put({
+          ...frontier,
+          id,
+          repertoireId: target.id,
+          path: frontier.path.map(step => ({
+            ...step,
+            edgeId: step.edgeId ? edgeId(target.id, step.fromFen, step.toFen) : step.edgeId,
+          })),
+        });
+      }
+    }
+
+    await tx.objectStore('repertoires').put({
+      ...target,
+      rootFen: STARTING_FEN_NORM,
+      openingKey: null,
+      projectKind: 'standard',
+      updatedAt: new Date().toISOString(),
+    });
+
+    if ((source.projectKind ?? 'standard') !== 'siloed') {
+      await tx.objectStore('repertoires').delete(source.id);
+      for (const edge of sourceEdges) await edgeStore.delete(edge.id);
+      for (const frontier of sourceFrontiers) await frontierStore.delete(frontier.id);
+      removedRepertoires++;
+    }
+
+    await tx.done;
+  }
+
+  return { migratedRepertoires: legacySources.length, copiedEdges, removedRepertoires };
+}
+
+function isLegacyOpeningRepertoire(rep: Repertoire): boolean {
+  if (!rep.openingKey) return false;
+  if (rep.name === 'White Main Repertoire' || rep.name === 'Black Main Repertoire') return false;
+  return true;
+}
+
+function mergeMigratedEdge(existing: Edge, incoming: Edge, repertoireColor: Color): Edge {
+  const existingIsUser = existing.mover === repertoireColor && !existing.isScaffold;
+  const incomingIsUser = incoming.mover === repertoireColor && !incoming.isScaffold;
+  const preferred = incomingIsUser && (!existingIsUser || incoming.reps > existing.reps) ? incoming : existing;
+  return {
+    ...existing,
+    ...preferred,
+    id: existing.id,
+    repertoireId: existing.repertoireId,
+    isScaffold: existing.isScaffold && incoming.isScaffold ? true : undefined,
+    recommendationSource: existing.recommendationSource ?? incoming.recommendationSource,
+    sourcePlayerName: existing.sourcePlayerName ?? incoming.sourcePlayerName,
+    sourceGameName: existing.sourceGameName ?? incoming.sourceGameName,
+    sourceWins: Math.max(existing.sourceWins ?? 0, incoming.sourceWins ?? 0) || undefined,
+    sourceDraws: Math.max(existing.sourceDraws ?? 0, incoming.sourceDraws ?? 0) || undefined,
+    sourceLosses: Math.max(existing.sourceLosses ?? 0, incoming.sourceLosses ?? 0) || undefined,
+    sourceNet: Math.max(existing.sourceNet ?? 0, incoming.sourceNet ?? 0) || undefined,
+    isMistake: existing.isMistake || incoming.isMistake || undefined,
+    reps: Math.max(existing.reps, incoming.reps),
+    lapses: Math.max(existing.lapses, incoming.lapses),
+    intervalDays: Math.max(existing.intervalDays, incoming.intervalDays),
+    ease: Math.max(existing.ease, incoming.ease),
+    dueAt: existing.reps >= incoming.reps ? existing.dueAt : incoming.dueAt,
+    lastReviewedAt: [existing.lastReviewedAt, incoming.lastReviewedAt].filter(Boolean).sort().at(-1) ?? null,
+  };
 }
 
 // ---------- Contamination cleanup ----------
@@ -660,51 +934,79 @@ export async function removeScaffoldContamination(repertoireId: string): Promise
   return toDelete.size;
 }
 
-// One-time migration: for every curated-opening repertoire whose rootFen is still the
-// starting position, advance rootFen to the position after the opening moves and delete
-// the scaffold path + any contamination that lived before that position.
-export async function migrateToFenRoots(): Promise<void> {
+// One-time migration: older curated-opening repertoires were rooted at the
+// opening signature position, so the old add workflow acted like adding to one
+// opening container. Re-root them at the normal starting position and keep
+// their existing branches reachable via scaffold moves.
+export async function migrateToStartingRoots(): Promise<void> {
   const reps = await listRepertoires();
   for (const rep of reps) {
     if (!rep.openingKey) continue;
-    if (rep.rootFen !== STARTING_FEN_NORM) continue; // already migrated
+    if (rep.rootFen === STARTING_FEN_NORM) continue;
     const opening = findOpening(rep.openingKey);
     if (!opening || opening.moves.length === 0) continue;
 
-    const newRootFen = computeOpeningFen(opening.moves);
-    if (newRootFen === STARTING_FEN_NORM) continue;
+    const openingFen = computeOpeningFen(opening.moves);
+    if (openingFen !== rep.rootFen) continue;
+
+    let cursorFen: NormFen = STARTING_FEN_NORM;
+    for (const move of opening.moves) {
+      const played = await playMoveInRepertoire(rep.id, cursorFen, move, { isScaffold: true });
+      if (!played) throw new Error(`Could not migrate ${rep.name}: ${move} is not legal from the opening path.`);
+      cursorFen = played.edge.childFen;
+    }
 
     const db = await getDB();
-    const allEdges: Edge[] = await db.getAllFromIndex('edges', 'by-repertoire', rep.id);
-
-    const byParent = new Map<string, Edge[]>();
-    for (const e of allEdges) {
-      const arr = byParent.get(e.parentFen) ?? [];
-      arr.push(e);
-      byParent.set(e.parentFen, arr);
-    }
-
-    // BFS from newRootFen to find all reachable edge IDs.
-    const reachable = new Set<string>();
-    const queue = [newRootFen];
-    const visitedFens = new Set<string>();
-    while (queue.length) {
-      const fen = queue.shift()!;
-      if (visitedFens.has(fen)) continue;
-      visitedFens.add(fen);
-      for (const e of (byParent.get(fen) ?? [])) {
-        reachable.add(e.id);
-        queue.push(e.childFen);
-      }
-    }
-
-    // Delete scaffold path + contamination; advance rootFen.
-    const toDelete = allEdges.filter(e => !reachable.has(e.id)).map(e => e.id);
-    const tx = db.transaction(['repertoires', 'edges'], 'readwrite');
-    for (const id of toDelete) tx.objectStore('edges').delete(id);
-    tx.objectStore('repertoires').put({ ...rep, rootFen: newRootFen, updatedAt: new Date().toISOString() });
+    const tx = db.transaction(['repertoires'], 'readwrite');
+    tx.objectStore('repertoires').put({ ...rep, rootFen: STARTING_FEN_NORM, updatedAt: new Date().toISOString() });
     await tx.done;
+    await clearFrontiersForRepertoire(rep.id);
   }
+}
+
+// ---------- Ready-Line cache ----------
+
+// All pre-built lines for a repertoire, scoped to a specific opening. Sorted by
+// createdAt asc so the oldest (FIFO) is consumed first.
+export async function getReadyLines(repertoireId: string, scopeKey: string): Promise<ReadyLine[]> {
+  const db = await getDB();
+  const lines = await db.getAllFromIndex('readyLines', 'by-rep-scope', [repertoireId, scopeKey]);
+  return lines.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+export async function getReadyLinesForRepertoire(repertoireId: string): Promise<ReadyLine[]> {
+  const db = await getDB();
+  const lines = await db.getAllFromIndex('readyLines', 'by-repertoire', repertoireId);
+  return lines.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+export async function countReadyLines(repertoireId: string, scopeKey: string): Promise<number> {
+  const db = await getDB();
+  return db.countFromIndex('readyLines', 'by-rep-scope', [repertoireId, scopeKey]);
+}
+
+export async function putReadyLine(line: ReadyLine): Promise<void> {
+  const db = await getDB();
+  await db.put('readyLines', line);
+}
+
+export async function deleteReadyLine(id: string): Promise<void> {
+  const db = await getDB();
+  await db.delete('readyLines', id);
+}
+
+// Optional cleanup: drop all ready lines for a repertoire (or one scope within it).
+// Used when a repertoire is deleted, or to manually flush stale cache during dev.
+export async function clearReadyLines(repertoireId: string, scopeKey?: string): Promise<number> {
+  const db = await getDB();
+  const lines = scopeKey
+    ? await db.getAllFromIndex('readyLines', 'by-rep-scope', [repertoireId, scopeKey])
+    : await db.getAllFromIndex('readyLines', 'by-repertoire', repertoireId);
+  if (lines.length === 0) return 0;
+  const tx = db.transaction('readyLines', 'readwrite');
+  for (const line of lines) await tx.store.delete(line.id);
+  await tx.done;
+  return lines.length;
 }
 
 // ---------- Meta ----------

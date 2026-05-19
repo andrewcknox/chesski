@@ -40,10 +40,10 @@ export function HistoryMode({ onProgressChange }: HistoryModeProps) {
     return [...cardStats].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   }, [cardOrder, cardStats]);
 
-  const dueCards = orderedCardStats.filter(item => isHistoryDue(item.progress, now));
+  const reviewDueCards = orderedCardStats.filter(item => progressByCard[item.id] != null && isHistoryDue(item.progress, now));
   const newCards = orderedCardStats.filter(item => !progressByCard[item.id]);
   const learnedCount = cardStats.filter(item => item.progress.reps > 0 && !isHistoryDue(item.progress, now)).length;
-  const active = dueCards[0] ?? newCards[0] ?? [...cardStats].sort((a, b) => a.progress.dueAt.localeCompare(b.progress.dueAt))[0];
+  const active = reviewDueCards[0] ?? newCards[0] ?? [...cardStats].sort((a, b) => a.progress.dueAt.localeCompare(b.progress.dueAt))[0];
 
   async function grade(cardIdToGrade: string, known: boolean) {
     const current = progressByCard[cardIdToGrade] ?? freshHistoryProgress();
@@ -93,7 +93,7 @@ export function HistoryMode({ onProgressChange }: HistoryModeProps) {
       <div className="panel">
         <h3>Progress</h3>
         <div className="history-stats">
-          <div><strong>{dueCards.length}</strong><span className="muted small"> due</span></div>
+          <div><strong>{reviewDueCards.length}</strong><span className="muted small"> due</span></div>
           <div><strong>{learnedCount}</strong><span className="muted small"> remembered</span></div>
           <div><strong>{reviewedThisSession}</strong><span className="muted small"> today</span></div>
         </div>

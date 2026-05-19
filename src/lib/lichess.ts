@@ -26,6 +26,11 @@ export interface CloudEvalPv {
   mate?: number;
   // Space-separated UCI moves. moves[0] is the engine's choice in this PV.
   moves: string;
+  // Win/Draw/Loss probabilities from the side-to-move's perspective, per-mille
+  // (each value 0–1000, summing to 1000). Emitted by local Stockfish when
+  // UCI_ShowWDL is enabled. Lichess cloud-eval does not provide WDL today, so
+  // this is undefined when the eval came from the cloud fallback.
+  wdl?: { win: number; draw: number; loss: number };
 }
 export interface CloudEvalResponse {
   fen: string;
@@ -121,8 +126,11 @@ export async function fetchExplorerDefault(normFen: NormFen, signal?: AbortSigna
 
 // Cloud-eval. Returns null if Lichess has no analyzed result for this position (404).
 // No token required.
-export async function fetchCloudEval(normFen: NormFen, multiPv = 5, signal?: AbortSignal): Promise<CloudEvalResponse | null> {
-  const local = await fetchLocalStockfishEval(normFen, multiPv, signal);
+// `depth` only affects the local Stockfish path (Lichess cloud-eval has no depth param —
+// it serves whatever's cached). Local SF cache key includes depth so different depths
+// don't share results.
+export async function fetchCloudEval(normFen: NormFen, multiPv = 5, depth?: number, signal?: AbortSignal): Promise<CloudEvalResponse | null> {
+  const local = await fetchLocalStockfishEval(normFen, multiPv, depth, signal);
   if (local) return local;
 
   const cached = evalCache.get(normFen);
@@ -145,31 +153,35 @@ export async function fetchCloudEval(normFen: NormFen, multiPv = 5, signal?: Abo
   return data;
 }
 
-async function fetchLocalStockfishEval(normFen: NormFen, multiPv = 5, signal?: AbortSignal): Promise<CloudEvalResponse | null> {
-  const cacheKey = JSON.stringify({ fen: normFen, multiPv });
+// Local-Stockfish-only eval. Use this for any decision that depends on a specific depth
+// (user-move picking, the quality gate, mistake-tagging during line construction).
+// Never falls through to Lichess cloud-eval — Lichess ignores the depth argument and
+// returns whatever is cached, which silently degrades depth-sensitive callers.
+// Returns null when local Stockfish is unavailable; callers should surface that.
+export async function fetchLocalEval(normFen: NormFen, multiPv = 5, depth?: number, signal?: AbortSignal): Promise<CloudEvalResponse | null> {
+  return fetchLocalStockfishEval(normFen, multiPv, depth, signal);
+}
+
+async function fetchLocalStockfishEval(normFen: NormFen, multiPv = 5, depth?: number, signal?: AbortSignal): Promise<CloudEvalResponse | null> {
+  const cacheKey = JSON.stringify({ fen: normFen, multiPv, depth: depth ?? null });
   const cached = localEvalCache.get(cacheKey);
-  if (cached !== undefined) return cached;
+  // Only positive results are cached — failures (timeout, abort, non-OK, empty PVs)
+  // are retried every call so transient hiccups don't permanently poison a position.
+  if (cached) return cached;
   let res: Response;
   try {
     res = await fetch('/api/stockfish/eval', {
       method: 'POST',
       signal,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fen: normFen, multiPv }),
+      body: JSON.stringify(depth !== undefined ? { fen: normFen, multiPv, depth } : { fen: normFen, multiPv }),
     });
   } catch {
-    localEvalCache.set(cacheKey, null);
     return null;
   }
-  if (!res.ok) {
-    localEvalCache.set(cacheKey, null);
-    return null;
-  }
+  if (!res.ok) return null;
   const data = (await res.json()) as CloudEvalResponse;
-  if (!data.pvs?.length) {
-    localEvalCache.set(cacheKey, null);
-    return null;
-  }
+  if (!data.pvs?.length) return null;
   localEvalCache.set(cacheKey, data);
   return data;
 }

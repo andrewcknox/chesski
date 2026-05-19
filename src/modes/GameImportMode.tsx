@@ -4,16 +4,99 @@ import { applyMove, STARTING_FEN_NORM } from '../lib/chess';
 import {
   ALGORITHM_TOOLTIP,
   buildImportDraft,
+  resolvePlayerConflict,
+  type ConflictMoveStats,
   type ImportDraft,
   type ImportSource,
   type ImportSpeed,
   type RootDraft,
 } from '../lib/gameImport';
 import { rememberImportDraft } from '../lib/importMemory';
-import { addMovesToRepertoire, getRepertoire, markCuratedOpeningScaffolds } from '../lib/storage';
+import { prepareOpeningLineForRepertoire } from '../lib/openingRoots';
+import { getEdgesFromParent, getRepertoire, markCuratedOpeningScaffolds, playMoveInRepertoire, swapMoveInRepertoire } from '../lib/storage';
 import type { Color, NormFen, Repertoire } from '../types';
+import { ConflictResolveModal } from './ConflictResolveModal';
 
 const DEFAULT_PREP_PROMPT_THRESHOLD = 5;
+
+interface ConflictPrompt {
+  fen: NormFen;
+  color: Color;
+  existing: ConflictMoveStats;
+  candidate: ConflictMoveStats;
+  algorithmPickSan: string | null;
+  reason: string;
+}
+
+interface LineApplyOutcome {
+  addedEdges: number;
+  reusedEdges: number;
+  cancelled: boolean;
+  skippedAtSan?: string;
+}
+
+async function applyLineWithConflictResolution(args: {
+  rep: Repertoire;
+  moves: string[];
+  scaffoldPlyCount: number;
+  cpLossThreshold: number;
+  decisions: Map<string, 'existing' | 'new'>;
+  askConflict: (prompt: ConflictPrompt) => Promise<'existing' | 'new' | 'cancel'>;
+}): Promise<LineApplyOutcome> {
+  const { rep, moves, scaffoldPlyCount, cpLossThreshold, decisions, askConflict } = args;
+  let cursorFen: NormFen = rep.rootFen;
+  let added = 0;
+  let reused = 0;
+  for (const [idx, move] of moves.entries()) {
+    const result = applyMove(cursorFen, move);
+    if (!result) throw new Error(`Could not add move ${move} from this position.`);
+    const isScaffold = idx < scaffoldPlyCount;
+    const isPlayerMove = result.mover === rep.color;
+
+    if (isPlayerMove && !isScaffold && cursorFen !== rep.rootFen) {
+      const existingEdges = await getEdgesFromParent(rep.id, cursorFen);
+      const conflictingExisting = existingEdges.find(e => e.mover === rep.color && !e.isScaffold && e.uci !== result.uci);
+      if (conflictingExisting) {
+        const key = `${cursorFen}|${conflictingExisting.uci}|${result.uci}`;
+        let decision = decisions.get(key);
+        if (!decision) {
+          const resolved = await resolvePlayerConflict(cursorFen, rep.color, conflictingExisting.uci, result.uci, cpLossThreshold);
+          if (resolved.decision === 'existing' || resolved.decision === 'new') {
+            decision = resolved.decision;
+          } else {
+            const choice = await askConflict({
+              fen: cursorFen,
+              color: rep.color,
+              existing: resolved.existingStats,
+              candidate: resolved.newStats,
+              algorithmPickSan: resolved.algorithmPickSan,
+              reason: resolved.reason,
+            });
+            if (choice === 'cancel') return { addedEdges: added, reusedEdges: reused, cancelled: true };
+            decision = choice;
+          }
+          decisions.set(key, decision);
+        }
+        if (decision === 'existing') {
+          // Stop this line at the conflict — keep existing prep intact.
+          return { addedEdges: added, reusedEdges: reused, cancelled: false, skippedAtSan: result.san };
+        }
+        // decision === 'new': swap the conflicting edge for the new move, then continue.
+        await swapMoveInRepertoire(rep.id, cursorFen, conflictingExisting.childFen, move);
+        added += 1;
+        cursorFen = result.fen;
+        continue;
+      }
+    }
+
+    const played = await playMoveInRepertoire(rep.id, cursorFen, move, { isScaffold });
+    if (!played) throw new Error(`Could not add move ${move} from this position.`);
+    if (played.edgeCreated) added += 1;
+    else reused += 1;
+    cursorFen = played.edge.childFen;
+  }
+  return { addedEdges: added, reusedEdges: reused, cancelled: false };
+}
 
 export function GameImportMode({
   repertoires,
@@ -42,6 +125,8 @@ export function GameImportMode({
   const [busy, setBusy] = useState(false);
   const [applying, setApplying] = useState(false);
   const [applyStatus, setApplyStatus] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<ConflictPrompt | null>(null);
+  const conflictResolverRef = useRef<((c: 'existing' | 'new' | 'cancel') => void) | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const compatibleReps = useMemo(
@@ -106,6 +191,20 @@ export function GameImportMode({
     );
   }
 
+  async function askConflict(prompt: ConflictPrompt): Promise<'existing' | 'new' | 'cancel'> {
+    return new Promise(resolve => {
+      conflictResolverRef.current = resolve;
+      setConflict(prompt);
+    });
+  }
+
+  function resolveConflict(choice: 'existing' | 'new' | 'cancel') {
+    const resolver = conflictResolverRef.current;
+    conflictResolverRef.current = null;
+    setConflict(null);
+    resolver?.(choice);
+  }
+
   async function applyDraft(rootKey = selectedRootKey) {
     if (!draft || !target || !rootKey) return;
     const root = draft.roots.find(item => item.opening.key === rootKey);
@@ -113,23 +212,47 @@ export function GameImportMode({
     setApplying(true);
     setError(null);
     setApplyStatus(null);
+    const playerConflictDecisions = new Map<string, 'existing' | 'new'>(); // key: parentFen|existingUci|newUci
+    const skippedLines: string[] = [];
+    let cancelled = false;
     try {
       const rep = await getRepertoire(target.id);
       if (!rep) throw new Error('Could not find that repertoire.');
       let added = 0;
       let reused = 0;
       for (const line of root.lines) {
-        const result = await addMovesToRepertoire(rep, line, { scaffoldPlyCount: root.opening.moves.length });
-        added += result.addedEdges;
-        reused += result.reusedEdges;
+        if (cancelled) break;
+        const prepared = prepareOpeningLineForRepertoire(rep, root.opening, line);
+        if (prepared.moves.length === 0) continue;
+        const outcome = await applyLineWithConflictResolution({
+          rep,
+          moves: prepared.moves,
+          scaffoldPlyCount: prepared.scaffoldPlyCount,
+          cpLossThreshold: draft.cpLossThreshold,
+          decisions: playerConflictDecisions,
+          askConflict,
+        });
+        if (outcome.cancelled) { cancelled = true; break; }
+        added += outcome.addedEdges;
+        reused += outcome.reusedEdges;
+        if (outcome.skippedAtSan) skippedLines.push(`${line.join(' ')} (stopped at ${outcome.skippedAtSan})`);
       }
       await markCuratedOpeningScaffolds(rep);
       await onChanged();
-      setApplyStatus(`${root.opening.name}: ${added} moves added, ${reused} reused. The other imported openings are saved for later.`);
-      onOpen(rep.id);
+      if (cancelled) {
+        setError('Apply cancelled.');
+      } else {
+        const skipNote = skippedLines.length > 0
+          ? ` ${skippedLines.length} line${skippedLines.length === 1 ? '' : 's'} were trimmed at a conflict point.`
+          : '';
+        setApplyStatus(`${root.opening.name}: ${added} moves added, ${reused} reused.${skipNote} The other imported openings are saved for later.`);
+        onOpen(rep.id);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      conflictResolverRef.current = null;
+      setConflict(null);
       setApplying(false);
     }
   }
@@ -137,9 +260,10 @@ export function GameImportMode({
   return (
     <div className="layout import-layout">
       <div className="panel import-source-panel">
-        <h3>Build From My Games</h3>
+        <div className="eyebrow">Games</div>
+        <h2>Build from games</h2>
         <div className="muted small settings-copy">
-          Chesski imports only the side and speeds you choose, maps those games onto the preset openings, and drafts transparent keep-or-replace recommendations.
+          Import games to find openings worth studying.
         </div>
 
         <div className="segmented import-source-toggle">
@@ -266,9 +390,9 @@ export function GameImportMode({
         </div>
 
         {!draft ? (
-          <div className="settings-empty-drop">Build a draft to see which openings Chesski can make from your games.</div>
+          <div className="settings-empty-drop empty-state">Import games to find openings worth studying.</div>
         ) : draft.roots.length === 0 ? (
-          <div className="settings-empty-drop">{draft.skippedReason ?? 'No draft lines yet.'}</div>
+          <div className="settings-empty-drop empty-state">{draft.skippedReason ?? 'No imported games yet.'}</div>
         ) : (
           <>
             <OpeningPromptList
@@ -295,6 +419,17 @@ export function GameImportMode({
 
         {applyStatus && <div className="account-status good small">{applyStatus}</div>}
       </div>
+      {conflict && (
+        <ConflictResolveModal
+          fen={conflict.fen}
+          color={conflict.color}
+          existing={conflict.existing}
+          candidate={conflict.candidate}
+          algorithmPickSan={conflict.algorithmPickSan}
+          reason={conflict.reason}
+          onChoose={resolveConflict}
+        />
+      )}
     </div>
   );
 }

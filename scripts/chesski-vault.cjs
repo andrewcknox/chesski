@@ -116,10 +116,6 @@ async function handleVaultApi(req, res, baseUrl) {
     sendJson(res, 200, { ok: true, path: VAULT_PATH });
     return true;
   }
-  if (url.pathname.startsWith('/api/')) {
-    sendJson(res, 404, { error: 'Not found' });
-    return true;
-  }
   return false;
 }
 

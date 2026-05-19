@@ -5,11 +5,13 @@ import { getMeta, setMeta } from './storage';
 export type AppThemeKey = 'dark' | 'light';
 export type BoardThemeKey = 'classic' | 'blue' | 'green' | 'gray';
 export type PieceSetKey = 'staunton' | 'fantasy' | 'spatial' | 'chessnut';
+export type AccentColorKey = 'bronze' | 'steel' | 'purple' | 'hacker' | 'chessdotcom' | 'gold' | 'yellow' | 'red' | 'pink';
 
 export interface BoardPreferences {
   appTheme: AppThemeKey;
   boardTheme: BoardThemeKey;
   pieceSet: PieceSetKey;
+  accentColor: AccentColorKey;
   animationsEnabled: boolean;
   animationSpeedMs: number;
   soundEnabled: boolean;
@@ -20,6 +22,7 @@ export const DEFAULT_BOARD_PREFERENCES: BoardPreferences = {
   appTheme: 'dark',
   boardTheme: 'classic',
   pieceSet: 'staunton',
+  accentColor: 'bronze',
   animationsEnabled: true,
   animationSpeedMs: 110,
   soundEnabled: false,
@@ -43,6 +46,18 @@ export const PIECE_SET_OPTIONS: Array<{ key: PieceSetKey; name: string }> = [
 export const APP_THEME_OPTIONS: Array<{ key: AppThemeKey; name: string }> = [
   { key: 'dark', name: 'Dark' },
   { key: 'light', name: 'Light' },
+];
+
+export const ACCENT_COLOR_OPTIONS: Array<{ key: AccentColorKey; name: string; swatch: string }> = [
+  { key: 'bronze',     name: 'Bronze',         swatch: '#b58b4f' },
+  { key: 'steel',     name: 'Steel Blue',     swatch: '#5b8db8' },
+  { key: 'purple',    name: 'Purple',          swatch: '#9b59b6' },
+  { key: 'hacker',    name: 'Hacker Green',   swatch: '#00e541' },
+  { key: 'chessdotcom', name: 'Chess.com',    swatch: '#81b64c' },
+  { key: 'gold',      name: 'Gold',            swatch: '#d4ac0d' },
+  { key: 'yellow',    name: 'Yellow',          swatch: '#e8c040' },
+  { key: 'red',       name: 'Red',             swatch: '#d24b48' },
+  { key: 'pink',      name: 'Pink',            swatch: '#d63384' },
 ];
 
 const META_BOARD_PREFERENCES = 'board_preferences_v1';
@@ -82,6 +97,10 @@ export function BoardPreferencesProvider({ children }: { children: React.ReactNo
     document.documentElement.dataset.theme = preferences.appTheme;
   }, [preferences.appTheme]);
 
+  useEffect(() => {
+    document.documentElement.dataset.accent = preferences.accentColor;
+  }, [preferences.accentColor]);
+
   return (
     <BoardPreferencesContext.Provider value={value}>
       {children}
@@ -103,6 +122,8 @@ function normalizeBoardPreferences(saved?: Partial<BoardPreferences>): BoardPref
     ?? DEFAULT_BOARD_PREFERENCES.boardTheme;
   const pieceSet = PIECE_SET_OPTIONS.find(option => option.key === savedPieceSet)?.key
     ?? DEFAULT_BOARD_PREFERENCES.pieceSet;
+  const accentColor = ACCENT_COLOR_OPTIONS.find(option => option.key === saved?.accentColor)?.key
+    ?? DEFAULT_BOARD_PREFERENCES.accentColor;
   const animationSpeedMs = typeof saved?.animationSpeedMs === 'number'
     ? Math.max(40, Math.min(260, Math.round(saved.animationSpeedMs)))
     : DEFAULT_BOARD_PREFERENCES.animationSpeedMs;
@@ -111,6 +132,7 @@ function normalizeBoardPreferences(saved?: Partial<BoardPreferences>): BoardPref
     appTheme,
     boardTheme,
     pieceSet,
+    accentColor,
     animationsEnabled: typeof saved?.animationsEnabled === 'boolean'
       ? saved.animationsEnabled
       : DEFAULT_BOARD_PREFERENCES.animationsEnabled,

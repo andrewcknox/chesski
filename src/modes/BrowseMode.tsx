@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { Board } from '../components/Board';
+import { BoardThumbnail } from '../components/BoardThumbnail';
 import { TreeView } from '../components/TreeView';
-import { deleteSubtreeInRepertoire, getEdgesForRepertoire, getAllNodes, putEdge, resetAllSrsForRepertoire } from '../lib/storage';
+import { deleteOpeningFolderInRepertoire, deleteSubtreeInRepertoire, getEdgesForRepertoire, getAllNodes, putEdge, resetAllSrsForRepertoire } from '../lib/storage';
 import { freshSrsState } from '../lib/srs';
 import { pvCpForColor } from '../lib/autosuggest';
 import { fetchCloudEval } from '../lib/lichess';
+import { listOpeningFoldersForRepertoire, type OpeningFolder } from '../lib/openingFolders';
+import { buildPreparedLineItems } from '../lib/viewLines';
 import type { Edge, NormFen, PositionNode, Repertoire } from '../types';
 import ecoDataRaw from '../data/eco.json';
 
@@ -29,84 +32,8 @@ interface LineItem {
   fullSan: string;
 }
 
-function buildLines(rootFen: NormFen, edges: Edge[]): LineItem[] {
-  // Build adjacency: parent → outgoing edges
-  const byParent = new Map<NormFen, Edge[]>();
-  for (const e of edges) {
-    let arr = byParent.get(e.parentFen);
-    if (!arr) { arr = []; byParent.set(e.parentFen, arr); }
-    arr.push(e);
-  }
-  // DFS from root, generating one LineItem per leaf.
-  const lines: LineItem[] = [];
-  function dfs(curFen: NormFen, pathSoFar: Edge[]) {
-    const out = byParent.get(curFen) || [];
-    if (out.length === 0) {
-      // Leaf
-      lines.push(makeLineItem(rootFen, curFen, pathSoFar));
-      return;
-    }
-    for (const e of out) {
-      dfs(e.childFen, [...pathSoFar, e]);
-    }
-  }
-  dfs(rootFen, []);
-  return lines;
-}
-
-function makeLineItem(rootFen: NormFen, leafFen: NormFen, path: Edge[]): LineItem {
-  // Walk from leaf back toward root, find deepest ECO-named position.
-  let categoryFen: NormFen | null = null;
-  let categoryName: string | null = null;
-  let categoryEco: string | null = null;
-  let categoryIdx = -1; // position in path (0 = after edge[0], -1 = root)
-
-  // Check root first — many openings start at the root position equivalent.
-  const rootMatch = lookupOpening(rootFen);
-  if (rootMatch) {
-    categoryFen = rootFen;
-    categoryName = rootMatch.name;
-    categoryEco = rootMatch.eco;
-    categoryIdx = -1;
-  }
-
-  for (let i = 0; i < path.length; i++) {
-    const fen = path[i].childFen;
-    const m = lookupOpening(fen);
-    if (m) {
-      categoryFen = fen;
-      categoryName = m.name;
-      categoryEco = m.eco;
-      categoryIdx = i;
-    }
-  }
-
-  const extensionEdges = path.slice(categoryIdx + 1);
-  const extensionSan = renderSanFromEdges(extensionEdges, categoryIdx + 1);
-  const fullSan = renderSanFromEdges(path);
-  return { leafFen, path, categoryFen, categoryName, categoryEco, extensionSan, fullSan };
-}
-
-function renderSanFromEdges(edges: Edge[], startingPly = 0): string {
-  const out: string[] = [];
-  let moveNum = Math.floor(startingPly / 2) + 1;
-  let ply = startingPly;
-  // We need to know the starting move number: derive from the first edge's mover.
-  // If first edge mover === 'b', that's "1...e5" style; we treat that as starting at move 1 black.
-  // For simplicity: use full move numbers based on absolute position (we don't have ply count handy
-  // — just emit "X." before white moves).
-  for (const e of edges) {
-    if (e.mover === 'w') {
-      out.push(`${moveNum}.`);
-      out.push(e.san);
-    } else {
-      if (ply === startingPly) out.push(`${moveNum}...`);
-      out.push(e.san);
-      moveNum++;
-    }
-    ply++;
-  }
-  return out.join(' ');
+function buildLines(rootFen: NormFen, edges: Edge[], color: Repertoire['color']): LineItem[] {
+  return buildPreparedLineItems(rootFen, edges, color, lookupOpening) as LineItem[];
 }
 
 function lastMoveHighlights(edge: Edge): Record<string, string> {
@@ -203,13 +130,16 @@ function groupLines(lines: LineItem[], edges: Edge[]): OpeningGroup[] {
 
 export interface BrowseModeProps {
   repertoire: Repertoire;
+  openingKey: string | null;
+  onOpeningChange: (openingKey: string | null) => void;
   onDataChange: () => void;
   refreshKey: number;
   boardSize: number;
   onBoardSizeChange: (size: number) => void;
+  onBack?: () => void;
 }
 
-export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, onBoardSizeChange }: BrowseModeProps) {
+export function BrowseMode({ repertoire, openingKey, onOpeningChange, onDataChange, refreshKey, boardSize, onBoardSizeChange, onBack }: BrowseModeProps) {
   const [nodes, setNodes] = useState<Map<NormFen, PositionNode>>(new Map());
   const [edges, setEdges] = useState<Edge[]>([]);
   const [selectedLine, setSelectedLine] = useState<LineItem | null>(null);
@@ -228,8 +158,26 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
     setSelectedFen(repertoire.rootFen);
   }, [repertoire.id, repertoire.rootFen]);
 
-  const lines = useMemo(() => buildLines(repertoire.rootFen, edges), [repertoire.rootFen, edges]);
-  const groups = useMemo(() => groupLines(lines, edges), [lines, edges]);
+  const openingFolders = useMemo(() => listOpeningFoldersForRepertoire(repertoire, edges), [edges, repertoire]);
+  const selectedFolder = useMemo(() => {
+    if (openingKey) return openingFolders.find(folder => folder.key === openingKey) ?? null;
+    return null;
+  }, [openingFolders, openingKey]);
+
+  useEffect(() => {
+    if (openingKey && !selectedFolder) onOpeningChange(null);
+  }, [onOpeningChange, openingKey, selectedFolder]);
+
+  useEffect(() => {
+    setSelectedLine(null);
+    setSelectedPly(null);
+    setSelectedFen(selectedFolder?.baseFen ?? repertoire.rootFen);
+  }, [repertoire.id, repertoire.rootFen, selectedFolder?.key, selectedFolder?.baseFen]);
+
+  const lines = useMemo(() => buildLines(repertoire.rootFen, edges, repertoire.color), [repertoire.rootFen, repertoire.color, edges]);
+  const visibleLines = useMemo(() => selectedFolder ? lines.filter(line => lineBelongsToFolder(line, selectedFolder)) : lines, [lines, selectedFolder]);
+  const visibleEdges = useMemo(() => selectedFolder ? subtreeEdges(selectedFolder.baseFen, edges) : edges, [edges, selectedFolder]);
+  const groups = useMemo(() => groupLines(visibleLines, visibleEdges), [visibleLines, visibleEdges]);
 
   // The displayed FEN: line's leaf if a line is selected; otherwise the manually-selected fen.
   const displayedFen = selectedLine
@@ -254,13 +202,28 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
   }
 
   async function handleDeleteSubtree() {
-    if (displayedFen === repertoire.rootFen) {
-      alert("Can't delete the repertoire's root position.");
+    const protectedRoot = selectedFolder?.baseFen ?? repertoire.rootFen;
+    if (displayedFen === repertoire.rootFen || displayedFen === protectedRoot) {
+      alert("Can't delete this root position from here.");
       return;
     }
     const ok = window.confirm('Delete this position and all branches below it (in this repertoire)? This cannot be undone.');
     if (!ok) return;
     await deleteSubtreeInRepertoire(repertoire.id, displayedFen);
+    setSelectedLine(null);
+    setSelectedPly(null);
+    setSelectedFen(protectedRoot);
+    await reload();
+    onDataChange();
+  }
+
+  async function handleDeleteOpeningPrep() {
+    if (!selectedFolder) return;
+    const ok = window.confirm(`Delete all prep for "${selectedFolder.name}" inside "${repertoire.name}"? Shared earlier moves may remain if other openings use them.`);
+    if (!ok) return;
+    const incoming = selectedFolder.path[selectedFolder.path.length - 1] ?? null;
+    await deleteOpeningFolderInRepertoire(repertoire.id, selectedFolder.baseFen, incoming?.id ?? null);
+    onOpeningChange(null);
     setSelectedLine(null);
     setSelectedPly(null);
     setSelectedFen(repertoire.rootFen);
@@ -289,17 +252,32 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
   const inEdges = useMemo(() => edges.filter(e => e.childFen === displayedFen), [edges, displayedFen]);
   const userInEdges = useMemo(() => inEdges.filter(e => e.mover === repertoire.color && !e.isScaffold), [inEdges, repertoire.color]);
   const orientation: 'white' | 'black' = repertoire.color === 'w' ? 'white' : 'black';
+  const scopeTitle = selectedFolder ? `${repertoire.name} / ${selectedFolder.name}` : repertoire.name;
+  const browseBoardSize = Math.min(boardSize, 560);
 
   return (
-    <div className="layout">
+    <>
+    {onBack && (
+      <div className="subview-back-row">
+        <button onClick={onBack}>Back</button>
+      </div>
+    )}
+    <div className="layout focused-subview">
       <div>
+        <div className="page-header compact">
+          <div>
+            <div className="eyebrow">Lines</div>
+            <h1>{scopeTitle}</h1>
+          </div>
+        </div>
         <Board
           fen={displayedFen}
           orientation={orientation}
           allowMoves={false}
           onMove={() => false}
           highlights={selectedLineLastMove ? lastMoveHighlights(selectedLineLastMove) : undefined}
-          size={boardSize}
+          size={browseBoardSize}
+          maxSize={560}
           resizable
           onSizeChange={onBoardSizeChange}
           historyIndex={selectedLine ? selectedPly ?? selectedLine.path.length : undefined}
@@ -324,8 +302,11 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
         <details className="collapsible" style={{ marginTop: 8 }}>
           <summary>Manage</summary>
           <div className="row" style={{ marginTop: 8 }}>
-            <button className="danger" onClick={handleDeleteSubtree} disabled={displayedFen === repertoire.rootFen}>
+            <button className="danger" onClick={handleDeleteSubtree} disabled={displayedFen === repertoire.rootFen || displayedFen === selectedFolder?.baseFen}>
               Delete subtree
+            </button>
+            <button className="danger" onClick={handleDeleteOpeningPrep} disabled={!selectedFolder}>
+              Delete this opening prep
             </button>
             <button onClick={handleResetAllSrs}>Reset all SRS state</button>
           </div>
@@ -334,9 +315,26 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
 
       <div>
         <div className="panel">
-          <h3>Lines - {repertoire.name} ({repertoire.color === 'w' ? 'White' : 'Black'})</h3>
-          {lines.length === 0 ? (
-            <div className="muted small">No lines yet. Run a Train session to start populating the repertoire.</div>
+          <h3>{scopeTitle}</h3>
+          {openingFolders.length > 0 && (
+            <div className="row" style={{ marginBottom: 10 }}>
+              <label className="small muted" htmlFor="browse-opening-folder">Opening folder</label>
+              <select
+                id="browse-opening-folder"
+                value={selectedFolder?.key ?? ''}
+                onChange={e => onOpeningChange(e.target.value || null)}
+              >
+                <option value="">All openings</option>
+                {openingFolders.map(folder => (
+                  <option key={folder.key} value={folder.key}>{folder.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          {openingFolders.length === 0 ? (
+            <div className="settings-empty-drop empty-state">No openings yet. Add your first opening.</div>
+          ) : visibleLines.length === 0 ? (
+            <div className="settings-empty-drop empty-state">No lines in this opening yet.</div>
           ) : (
             <div>
               {groups.map(g => (
@@ -381,16 +379,46 @@ export function BrowseMode({ repertoire, onDataChange, refreshKey, boardSize, on
           <div style={{ marginTop: 8 }}>
             <TreeView
               nodes={nodes}
-              edges={edges}
+              edges={visibleEdges}
               currentFen={displayedFen}
-              rootFen={repertoire.rootFen}
+              rootFen={selectedFolder?.baseFen ?? repertoire.rootFen}
               onSelect={selectFen}
             />
           </div>
         </details>
       </div>
     </div>
+    </>
   );
+}
+
+function lineBelongsToFolder(line: LineItem, folder: OpeningFolder): boolean {
+  if (folder.path.length === 0) return true;
+  if (line.path.length < folder.path.length) return false;
+  return folder.path.every((edge, idx) => line.path[idx]?.id === edge.id);
+}
+
+function subtreeEdges(rootFen: NormFen, edges: Edge[]): Edge[] {
+  const byParent = new Map<NormFen, Edge[]>();
+  for (const edge of edges) {
+    const current = byParent.get(edge.parentFen) ?? [];
+    current.push(edge);
+    byParent.set(edge.parentFen, current);
+  }
+
+  const result: Edge[] = [];
+  const stack = [rootFen];
+  const visited = new Set<NormFen>();
+  while (stack.length) {
+    const fen = stack.pop()!;
+    if (visited.has(fen)) continue;
+    visited.add(fen);
+    for (const edge of byParent.get(fen) ?? []) {
+      result.push(edge);
+      stack.push(edge.childFen);
+    }
+  }
+  return result;
 }
 
 function SelectedLineEval({ line, color }: { line: LineItem; color: Repertoire['color'] }) {
@@ -462,14 +490,7 @@ function OpeningGroupView({ group, selectedLeafFen, onSelect, repertoireColor, b
       >
         {previewFen && (
           <div className="folder-preview-board" style={{ pointerEvents: 'none' }}>
-            <Board
-              fen={previewFen}
-              orientation={previewOrientation}
-              onMove={() => false}
-              allowMoves={false}
-              size={72}
-              showNotation={false}
-            />
+            <BoardThumbnail fen={previewFen} orientation={previewOrientation} size={72} />
           </div>
         )}
         <span className="folder-eco mono small muted">{group.eco ?? '-'}</span>
@@ -537,14 +558,7 @@ function VariationFolderView({ folder, selectedLeafFen, onSelect, repertoireColo
         className="variation-folder-head"
       >
         <div className="folder-preview-board" style={{ pointerEvents: 'none' }}>
-          <Board
-            fen={previewFen}
-            orientation={previewOrientation}
-            onMove={() => false}
-            allowMoves={false}
-            size={52}
-            showNotation={false}
-          />
+          <BoardThumbnail fen={previewFen} orientation={previewOrientation} size={52} />
         </div>
         <strong className="folder-title">{folder.label}</strong>
         <span className="folder-count muted small">{totalLineCount} line{totalLineCount === 1 ? '' : 's'}</span>
@@ -648,17 +662,10 @@ function LineCard({ line, selected, onClick, boardSize, repertoireColor }: {
       onClick={onClick}
     >
       <div className="line-card-board" style={{ pointerEvents: 'none' }}>
-        <Board
-          fen={line.leafFen}
-          orientation={orientation}
-          onMove={() => false}
-          allowMoves={false}
-          size={boardSize}
-          showNotation={false}
-        />
+        <BoardThumbnail fen={line.leafFen} orientation={orientation} size={boardSize} />
       </div>
       <div className="line-card-copy mono small">
-        {line.extensionSan || <span className="muted">(at the named position)</span>}
+        {line.extensionSan || line.fullSan || <span className="muted">(repertoire root)</span>}
       </div>
     </div>
   );

@@ -1,106 +1,203 @@
-# Chesski Wishlist
+# Chesski wishlist
 
-This file is a lightweight parking lot for ideas Andy wants to preserve for later planning.
+Major outstanding work, in rough priority order. Each item is a real design
+question, not a one-line tweak. Skim before starting a session that's adjacent
+to one of these — surprise overlap is the most common cause of regressions.
 
-## Repertoire And Database Ideas
+---
 
-- Replace the remaining top-right "+ New repertoire" advanced control with a clearer custom-import/tools path. The normal opening flow now lives in New Opening, but FEN/PGN/clone creation still needs a less awkward home.
-- Fix the My Lines tab regression. It used to work cleanly, but it is now badly broken and needs a focused repair pass.
-- In My Lines, when the user selects a line and it appears on the large board, show actions for "Review this prep" and "Learn a new line from here."
-- Add a right-side Masters database view inside Chesski, similar to the Lichess opening explorer.
-- Replace checkbox-style default-opening continuation picking with an immersive board-first flow: show the position, let the user play the move they know and want in their prep, validate it against pre-approved engine-checked/master-supported continuations, then return to earlier unresolved branches until the repertoire is filled in.
-- After a user selects a new opening to learn, bring them to the board and simulate the opening with them so Chesski can infer what prep they already know. This likely needs a stored database of opponent responses because live engine/API calls are too slow for a smooth setup flow.
-- Support downloaded top-player PGN bundles stored with the app instead of depending entirely on live API search.
-- Later, shrink the player-book bundle by moving exact source-game continuations out of `player-books.json` into compact per-player game files or source-game pointers. For now, keep the larger bundle because exact game stealing matters more than saving roughly 30 MB.
-- Start with a small player pack: Magnus Carlsen, Hikaru Nakamura, Fabiano Caruana, Garry Kasparov, Paul Morphy, and Bobby Fischer.
-- Add a stacked "play like these players" recommendation mode. For a position, check the user's priority players in order and prefer a move that player used successfully from the exact position. If the first player has no matching win or game, check the next player, then fall back to Masters data and engine evaluation.
-- Let users have more than one approved response in the same position, with study modes such as main line, sideline, or any prepared move.
-- Add fully separate siloed repertoire projects that can intentionally contradict other repertoires without being treated as conflicts. Example: one serious tournament repertoire and one experimental "play like Morphy" repertoire can both exist with different answers to the same position.
-- Import a user's game history, infer the lines they actually play, and flag repertoire moves as bad, improvable, acceptable, or optimal.
-- After the initial Chess.com/PGN repertoire import flow works, let users add their Lichess username as another source for importing their own games.
-- Add a "Punisher" mode: find common opening blunders that occur after positions already in the user's repertoire, prioritize moves with very high win rates for the user's side, and confirm the traps with Stockfish before teaching them.
-- Improve drag-reordering for "learn from these players/sources": while the user is holding an item, the other items should move live so the final order is visible before release.
+## Chessable-style SRS review rework
 
-## Accounts And Sync
+**Status:** Designed but not yet implemented. See the matching plan in
+`~/.claude/plans/` when active. **Priority: high** — this is the next major
+piece of training UX work after the line-selection ranking fix.
 
-- Fix account isolation. Separate accounts currently do not feel truly separate; importing personal games can report conflicts with stored database/repertoire data even when the account has not added lines yet.
-- True cross-device sync still needs a hosted backend. The current local vault is file-backed and durable on this computer, but it does not follow the user across devices.
+### Why this matters
 
-## Training And Review
+Chesski's current review system treats due cards too individually. Opening
+memorization works better when the user is placed inside a real line context —
+played up to the due move, prompted, and then carried forward through any
+adjacent due moves in the same line. Reviewing each due position as a
+standalone "puzzle" with no shared context makes the user re-learn the same
+opening over and over because every session looks unfamiliar, and it
+disproportionately drills the first few moves (which are due constantly
+because they're the prefix of everything).
 
-- Treat moves between the starting position and a core opening as scaffold only, not SRS cards.
-- When the user gets the last move wrong in a learning line, show clear wrong-answer feedback and show the correct move.
-- Add a flow-state mode where the top tabs are blocked or hidden and Chesski cycles through Learn and Review sessions until the user explicitly ends the flow.
-- Keep the prompted-move timer concept parked for later: optional adjustable timer with pause/resume, timeout grading, and correct-move reveal. It was removed from the active training UI because it made the board area too jumpy and tall.
-- Add a transition that sweeps across the board when Chesski switches from learning to reviewing.
-- Investigate why a generated learning line sometimes has only 3 new moves instead of the expected 5.
-- Improve the repeated-wrong-move switch prompt: let the user click "Use X instead" or "Stick with Y" immediately while the engine comparison loads, rather than blocking the session on "Checking with the engine."
-- After the user chooses to switch to their alternative move, regenerate the remaining line from that move so the learned sequence still totals the intended number of new moves.
-- Investigate why obvious early-theory positions sometimes return "Engine has no eval" or stay stuck checking the engine for a long time.
-- Make preparing a new line faster and more reliable. Sometimes it says it is preparing a new line and never completes until the app is restarted.
-- If engine eval shows "Current: ..." and "Line end: ..." for too long, show a clearer loading/error state and avoid leaving the user unsure whether anything is happening.
+### What we want
 
-## Analysis And Exploration
+The SRS *unit of state* remains an individual edge/position: "given this
+position, play the correct move." That doesn't change. What changes is the
+**review delivery layer**: review sessions should be served line-by-line and
+branch-by-branch, not card-by-card.
 
-- Add an analysis-board concept at any position with white/black exploration, Stockfish, book data, and related tools. This is low priority because it is complicated.
-- Before building the full analysis board, add a simpler button that opens Lichess analysis with the current FEN loaded.
+Concrete example. User is studying the Evans Gambit inside Italian:
 
-## Personalization And Preferences
+```
+1.e4 e5  2.Nf3 Nc6  3.Bc4 Bc5  4.b4 Bxb4  5.c3 Ba5  6.d4
+```
 
-- Add chessboard customizability.
-- Add chess piece customizability.
-- Add chess piece animation speed customizability, separately configurable for teaching and quiz/training.
-- Toggle highlighting legal moves.
-- Toggle piece sound.
+If the user has mastered the b4 reply to ...Bc5 and the c3 reply to ...Bxb4,
+but the d4 reply to ...Ba5 is due today, then:
 
-## Opening Discovery And Recommendations
+- The app plays through moves 1-5 automatically as **context**.
+- The app prompts the user for **d4** (the due card).
+- If the next move in this line (e.g., 6...exd4) and the user's reply (e.g.,
+  7.O-O) are also due, they're prompted inline without resetting to the root.
+- Only the prompted moves get SRS updates. Auto-played context moves do not.
 
-- Add a style quiz as an alternative to starting from scratch: tactical vs positional, conservative vs aggressive, sharp vs flat, then recommend an Algorithm pack based on the answers.
-- Browse other opening training apps for nice features Chesski lacks and could copy.
+### Tree-style review traversal
 
-## Motivation And Delight
+Because lines share prefixes, the order of branches matters. Random card order
+forces context resets; coherent branch order lets the user flow:
 
-- Generally beautify the website so it is pleasant to look at and feels good to use.
-- Add little icons for the players' heads in player/source lists.
-- Redesign the desktop/app icon from a stronger source asset. The current skier/knight mark does not read clearly enough as either a knight or a ski pole at desktop size.
-- Add more ADD-friendly animations that make the app feel rewarding and alive without slowing down fast training.
-- Add an Anki/GitHub-style heat map for daily activity, including reviews and new cards.
-- Add opening mastery titles based on how much the user has learned inside an opening. Example: after enough Evans Gambit moves, show titles like Evans Gambit appreciator, specialist, expert, etc. Thresholds need design.
+1. Collect all due cards in the selected scope (repertoire or opening folder).
+2. Map each due card to its path from the scope's root.
+3. Group cards by shared ancestry — find the deepest branch points that
+   cluster multiple due cards.
+4. Review the deepest-shared branch first as a coherent line:
+   - Auto-play non-due context moves.
+   - Prompt due moves in sequence.
+   - Continue until all due cards in that branch are handled.
+5. Move to the next nearest branch point. Don't jump back to the root unless
+   the next due card legitimately requires a different opening.
+6. Gradually peel upward/outward through the tree.
+7. Finish one major opening family before moving to the next.
 
-## UI Clarity
+For the Italian: review all due Giuoco Piano lines first (working from
+deepest clusters backward), then Knight Attack lines, then Evans Gambit
+lines, etc. — the user should feel like they're working through coherent
+opening families, not random positions.
 
-- Do a systematic holistic UI pass after the current feature fixes: identify useful low-effort changes, run them by Andy, then execute the approved ones.
+### What this is NOT
 
-## Board Interaction
+- **Not** a change to SRS state. Per-edge `ease` / `intervalDays` / `reps` /
+  `lapses` / `dueAt` stay exactly as they are. No schema migration of edges.
+- **Not** a change to the Learn pipeline. Frontier selection, line generation,
+  the ready-line cache, and the build worker stay untouched.
+- **Not** "review whole lines as a single unit." A line is a *delivery
+  vehicle*; the SRS unit is still the individual edge.
 
-- Support right-click square highlighting.
-- Support right-click-and-drag arrows, but constrain user-drawn arrows to legal chess geometry: ranks/files, perfect diagonals, and knight L-shapes only. For example, do not allow an arrow from d4 to f7.
-- Fix the semi-transparent blue knight suggestion arrow so overlapping parts do not get darker; the whole shape should be one uniform color.
+### Implementation considerations
 
-## Distribution And Setup
+When this is picked up, the design plan must address:
 
-- Make Chesski easy for people to download from GitHub and set up. Explore an installer EXE that installs dependencies/app files and creates a desktop icon. Estimate difficulty and choose the simplest durable packaging path.
+- **Current architecture inventory**: where edge SRS state lives, how
+  `buildReviewQueue` / `getEdgesByMover` / `isDue` produce the current
+  flat queue, and where TrainMode consumes it (`enterReviewPhase`).
+- **New derived structures**: a per-session "review plan" or "review
+  segments" type that groups due cards by branch. Derived only, never
+  persisted — recompute at session start.
+- **Tree grouping algorithm**: build paths from scope root to each due
+  card, find lowest common ancestors, order branches by "deepest shared
+  branch first" then by due-card count.
+- **Auto-play UI**: a short animation/flash for context moves, a clear
+  visual cue when the prompt arrives. Reuse the existing walkthrough
+  animation machinery if possible.
+- **SRS isolation**: gradeFail / gradePass / gradeLearnPass must fire
+  ONLY for prompted moves. Context moves never touch SRS state.
+- **Opening folder scope**: respect `edgesForOpeningFolder` exactly as
+  the current review queue does. The grouping algorithm runs on the
+  scoped edge set, not the whole repertoire.
+- **Performance**: build the day's review plan once per session start;
+  cache root-to-card paths during construction; don't re-scan the tree
+  on every prompt. Target: stays responsive on the 2000-edge Italian.
+- **Migration**: zero schema changes. The review plan is derived. If
+  the new code path has bugs, the existing flat review queue is the
+  fallback.
+- **Interactions to watch**: pre-generated line queue (Phase 2 of
+  line-selection — should not conflict because that's Learn-only), the
+  planned "flow state" feature (review continuity should help, not
+  hurt), imported-PGN review (must still work).
 
-## Completed Recently
+### Done criteria
 
-- Added a Home tab that answers "what opening am I studying?" and lets the user pick the current opening/repertoire before training.
-- Added a New Opening tab with compact board-preview catalog cards for creating repertoires or adding openings to existing repertoires.
-- Replaced the confusing Repertoires "Add opening" dropdown panel with a visual-catalog entry point.
-- Added the first app-side local account vault: username/password, saved Lichess token, repertoire snapshots, and chess-history card progress.
-- Made Vite dev mode use the same file-backed local vault API as the durable desktop launcher.
-- Preserved current guest progress when creating an account after using the app without one.
-- Added Account tab diagnostics showing storage mode, vault file path, browser origin, saved accounts, and rescue snapshots.
-- Renamed the main tabs and labels to match Andy's language: Trivia, My Lines, Analyze My Game, main repertoire, side repertoires.
-- Moved always-visible token management into the Account tab.
-- Fixed tiny My Lines board previews by hiding oversized coordinates and clipping preview frames cleanly.
-- Made trivia cards appear in a random session order instead of always walking the same sequence.
-- Expanded the chess-history trivia deck from 10 to 40 cloze cards.
-- Kept trivia available on the line-loading screen by falling back to least-recently-reviewed cards when nothing is due.
-- Added tagged chess quote trivia cards with speaker and quote-word clozes from `chess_quotes.csv`.
-- Randomized top-candidate introduction for brand-new SRS learning cards without changing due-card review order.
-- Made Learn + Review include fallback not-due review cards when the session starts with no due review work.
-- Made My Lines "Other Positions" collapsible, reduced board preview sizes, and strengthened open-folder styling.
-- Hid other top-level navigation while a training session is active.
-- Added app-wide light/dark mode in Settings.
-- Added a board setting to replace the drag-origin ghost piece with origin-square highlighting.
-- Moved arrow-key history scrubbing into the shared board wrapper and wired it through My Lines selected positions.
+- Reviewing a scoped opening with N due cards completes in roughly N
+  prompts, not N+(context overhead) prompts. Auto-played context is
+  visible but not counted.
+- Two adjacent due cards in the same line are prompted back-to-back
+  without a reset to the root.
+- A failed prompt re-queues that card the way the current flat queue
+  does, without disrupting the surrounding branch.
+- Review for a 2000-edge repertoire builds in under a second and
+  prompts feel instantaneous between cards.
+- `npm run build` clean. `npm test` clean. Add unit tests for the
+  grouping algorithm in `src/lib/review.test.ts` (new file).
+
+---
+
+## User-configurable per-move quality gate
+
+**Status:** Wishlist. No code, no schema. **Priority: medium** — the
+groundwork is in place (single chokepoint for the gate math); blocked on
+designing the settings surface and migration story.
+
+### Why this matters
+
+The per-move quality gate currently runs with fixed TUNING thresholds
+(`maxWdlExpectedScoreDrop = 35`, `maxWdlLossDelta = 35`,
+`maxCpLossFallbackPerMove = 100`). Different players want different
+risk profiles: an aggressive player wants the gate to forgive
+loss-probability drift if winning chances are preserved; a cautious
+player wants exactly the opposite. The line-selection doc already
+names presets — *strict* 20–25, *balanced* 35, *faithful* 50, *loose*
+75 — but they aren't user-selectable yet.
+
+### What we want
+
+Two related capabilities the settings surface should expose:
+
+1. **Threshold tuning.** Let the user pick a preset (or set a custom
+   value) for the existing `expectedScoreDrop` / `lossDelta` caps. The
+   chosen values must flow into BOTH the per-move quality gate AND the
+   player-book / database pickers, via the shared
+   `judgeCandidateAtFen` helper in `src/lib/autosuggest.ts`. The
+   picker and gate must stay symmetric — that is the load-bearing
+   property of the post-2026-05 refactor and the reason
+   `playerBookMaxCpLoss` was deleted.
+
+2. **Per-component (W/D/L) gate algorithm.** The current gate combines
+   two derived metrics (`expectedScoreDrop = ΔW + 0.5·ΔD`, `lossDelta = ΔL`).
+   A future iteration should let the user shape the gate over the raw
+   W/D/L deltas directly — separate caps on `ΔW` (acceptable
+   win-probability drop), `ΔD` (acceptable draw-probability shift),
+   `ΔL` (acceptable loss-probability rise) — and choose a weighting
+   profile mapped to player risk style:
+   - *Aggressive*: tight cap on `ΔW`, generous on `ΔL` — accepts
+     losing-prob increases as long as winning chances are preserved.
+   - *Cautious*: tight cap on `ΔL`, generous on `ΔW` — accepts giving
+     up winning chances if it prevents loss-prob rises.
+   - *Balanced*: middle-ground caps on all three, with a weighted-sum
+     score.
+   - *Custom*: numeric controls on each cap so power users can dial
+     in their own profile.
+
+### Implementation notes
+
+- **Single chokepoint.** `judgeCandidateAtFen` (`src/lib/autosuggest.ts`)
+  is the only place that decides `passed` for a candidate. Replace its
+  fixed-threshold `passed = …` block with a pluggable scorer
+  parameterized by the user's profile. `evaluateUserMove` and
+  `pickEngineSafePlayerBookMove` both call this helper, so both
+  inherit the new behavior automatically.
+- **Settings shape.** Likely a new `qualityProfile` field in
+  `RecommendationSettings` (or a sibling). Schema migration: default
+  the profile to "balanced 35/35" so existing repertoires behave
+  identically.
+- **Don't reintroduce source-local thresholds.** The DO NOT bullet in
+  `docs/line-selection.md` is load-bearing — the same threshold must
+  apply to picker and gate within one repertoire/opening scope.
+
+### Done criteria
+
+- User can switch quality profile from a settings panel; the change
+  takes effect on the next `generateLearnLine` call.
+- Same profile is consulted by `pickEngineSafePlayerBookMove` (picker)
+  and `evaluateUserMove` (gate); changing the profile changes both at
+  once.
+- A line built and accepted under a strict profile is rejected when
+  the gate is re-run under a stricter profile (sanity test).
+- `npm test` clean with new unit tests around the pluggable scorer.
+- Migration path verified: old repertoires/settings default to
+  balanced and produce no change in behaviour.
+
+---

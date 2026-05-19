@@ -1,9 +1,10 @@
 import type { Color, Edge, FrontierCandidate, FrontierSource, NormFen, ReadyLine, Repertoire } from '../types';
 import { frontierId } from '../types';
 import { applyMove, chessFromFen, STARTING_FEN_NORM, turnAt } from './chess';
-import { fetchCloudEval, fetchExplorer, LichessAuthError, type CloudEvalResponse, type LichessExplorerResponse, type LichessMove } from './lichess';
+import { fetchLocalEval, fetchExplorer, LichessAuthError, type CloudEvalResponse, type LichessExplorerResponse, type LichessMove } from './lichess';
 import {
   addMovesToRepertoire,
+  clearBlockedFrontiersForRepertoire,
   clearFrontiersForRepertoire,
   countReadyLines,
   getEdge,
@@ -21,7 +22,13 @@ import {
   restoreGenerationState,
   snapshotGenerationState,
 } from './storage';
-import { getPlayerBookMoves, type PlayerBookPick, type PlayerBookSourceLine } from './playerBook';
+import {
+  comparePlayerBookCandidates,
+  getPlayerBookCandidatesRaw,
+  isPlayerBookCandidateTakeable,
+  type PlayerBookPick,
+  type PlayerBookSourceLine,
+} from './playerBook';
 import { getEnabledRecommendationOrder, getRecommendationSettings, type DatabaseSourceKey, type PlayerKey } from './recommendationSettings';
 
 // Tunable knobs (per the spec we agreed).
@@ -36,9 +43,11 @@ export const TUNING = {
   // Stockfish depth used during line construction (per-move filter, ranking, opponent picks).
   engineDepthLineGen: 18,
   // Stockfish depth used for the post-generation quality gate (start + end FEN only).
-  // Keep this aligned with line generation so the gate does not veto depth-18 choices
-  // with a stricter, semantically different search.
-  engineDepthGate: 18,
+  // Aligned with engineDepthSelect (22) — the picker chooses moves at depth 22, so the
+  // gate must judge those choices at the same depth to avoid systematic disagreement
+  // between picker and gate. (Previously 18 to align with engineDepthLineGen; that
+  // alignment is moot now that the picker runs on local Stockfish at its true depth.)
+  engineDepthGate: 22,
   // Stockfish depth used by the training UI's live eval panel ("Current" / "Line end").
   // Kept shallower than the gate so the panel populates in a few seconds, not 15+.
   engineDepthDisplay: 14,
@@ -52,8 +61,28 @@ export const TUNING = {
   engineDepthSelect: 22,
   // Build worker fills the per-scope ready-line cache up to this many lines.
   readyLineCap: 3,
-  qualityGateMaxAttempts: 3,
-  qualityGateTimeoutMs: 120_000,
+  // Single attempt per generation run. Retries within one run can't help — the picker
+  // is deterministic per FEN, so a second attempt would build the same line. If a line
+  // is rejected, the failure report is the next debugging step. Blocked-frontier state
+  // is no longer used to alter retry behavior.
+  qualityGateMaxAttempts: 1,
+  // 30 minutes wall-clock. A full 5-user-move line at depth-22 needs ~10-15 serial
+  // Stockfish evals; budgeting generously means timing out only signals a real bug.
+  qualityGateTimeoutMs: 1_800_000,
+  // Quality gate thresholds, per-mille (engine WDL sums to 1000). A user move fails
+  // the gate if EITHER metric exceeds its threshold:
+  //   expectedScoreDrop = expectedScore(best) - expectedScore(played) > maxWdlExpectedScoreDrop
+  //   lossDelta         = played.loss - best.loss                     > maxWdlLossDelta
+  // 35 is "balanced": a move drops practical chances by ~3.5 percentage points.
+  // Presets: strict 20-25, balanced 35, faithful 50, loose 75.
+  // Expected-score is the primary gate; loss-delta is a hard guard against moves
+  // that swing position toward losing without much expected-score change.
+  maxWdlExpectedScoreDrop: 35,
+  maxWdlLossDelta: 35,
+  // cp-loss fallback when WDL is missing (e.g., Lichess cloud fallback or older
+  // engine output). Per-move centipawn loss vs engine-best; 100cp = Lichess
+  // "mistake" threshold. Applied per user-move in the line, not aggregate.
+  maxCpLossFallbackPerMove: 100,
   maxFrontierPlies: 32,
   // Historical name kept for compatibility with old docs. The frontier index is
   // no longer capped by this value; readyLineCap controls the small generated-line cache.
@@ -148,10 +177,14 @@ async function pickYourMoveDirect(
   const getEngine = () => {
     if (!enginePromise) {
       traceStep(trace, `Your move picker: requesting engine eval at depth ${TUNING.engineDepthSelect}, fen=${fen}.`);
-      enginePromise = fetchCloudEval(fen, TUNING.cloudEvalMultiPv, TUNING.engineDepthSelect, signal).then(engine => {
-        traceStep(trace, engine
-          ? `Your move picker: engine returned ${engine.pvs.length} PVs at depth ${engine.depth ?? 'unknown'}.`
-          : 'Your move picker: engine returned no eval.');
+      enginePromise = fetchLocalEval(fen, TUNING.cloudEvalMultiPv, TUNING.engineDepthSelect, signal).then(engine => {
+        if (!engine) {
+          traceStep(trace, `Your move picker: local Stockfish unavailable (no fallback to Lichess cloud — depth-sensitive). Check that /api/stockfish/eval is reachable.`);
+          return engine;
+        }
+        const got = engine.depth ?? 'unknown';
+        const shortfall = typeof got === 'number' && got < TUNING.engineDepthSelect ? ` (requested ${TUNING.engineDepthSelect}, undershot by ${TUNING.engineDepthSelect - got})` : '';
+        traceStep(trace, `Your move picker: engine returned ${engine.pvs.length} PVs at depth ${got}${shortfall}.`);
         return engine;
       });
     }
@@ -163,20 +196,17 @@ async function pickYourMoveDirect(
   for (const source of orderedSources) {
     if (source.kind === 'player-book') {
       if (options.skipPlayerBook) continue;
-      traceStep(trace, `Your move picker: trying player book ${source.key}.`);
       const playerPick = await pickEngineSafePlayerBookMove(
         source.key,
         fen,
         color,
-        settings.playerBookMaxCpLoss,
         getEngine,
-        signal
+        signal,
+        trace,
       );
       if (playerPick) {
-        traceStep(trace, `Your move picker: player book selected ${playerPick.san} (${playerPick.uci}), cpLoss=${playerPick.cpLoss ?? 'unknown'}.`);
         return playerBookPickToYourMove(playerPick);
       }
-      traceStep(trace, `Your move picker: player book ${source.key} had no usable move.`);
     } else {
       if (options.playerBookOnly) continue;
       const databasePick = await pickDatabaseMove(source.key, fen, color, getEngine, signal, trace);
@@ -241,22 +271,131 @@ async function pickAnyDatabaseMove(fen: NormFen, color: Color, signal?: AbortSig
   return null;
 }
 
+// Player-book picker with staged trace. Filters in five stages so each
+// rejection is legible in the genTrace:
+//   1) raw lookup    — was the position found in this player's book at all?
+//   2) legality      — does each raw candidate apply to this FEN? (catches
+//                      FEN-normalisation mismatches; normally zero)
+//   3) result gate   — `wins > losses` (book-internal result-based gate)
+//   4) WDL/cp gate   — shared `judgeCandidateAtFen` (identical to the per-move
+//                      quality gate, so any survivor is structurally
+//                      guaranteed to pass the gate downstream)
+//   5) selection     — first survivor after `compareCandidates` sort wins
+// See docs/line-selection.md → User-move selection → Player-book selection.
 async function pickEngineSafePlayerBookMove(
   playerKey: PlayerKey,
   fen: NormFen,
   color: Color,
-  maxCpLoss: number,
   getEngine: () => Promise<CloudEvalResponse | null>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  trace?: GenerationTrace,
 ): Promise<(PlayerBookPick & { cpLoss: number | null }) | null> {
-  const candidates = await getPlayerBookMoves(playerKey, fen, color, signal);
-  for (const candidate of candidates) {
-    const cpLoss = await candidateCpLoss(fen, candidate.uci, color, getEngine, signal);
-    if (cpLoss === null || cpLoss <= maxCpLoss) {
-      return { ...candidate, cpLoss };
+  const lookup = await getPlayerBookCandidatesRaw(playerKey, fen, color, signal);
+  const label = lookup.playerName ? `${lookup.playerName} (${playerKey})` : playerKey;
+  const raw = lookup.rawCandidates;
+
+  if (raw.length === 0) {
+    traceStep(trace, `Player book picker: ${label} — 0 matching moves at normalized FEN ${lookup.positionKey}.`);
+    return null;
+  }
+  traceStep(trace, `Player book picker: ${label} — ${raw.length} raw matching move(s) at normalized FEN ${lookup.positionKey}.`);
+
+  // Stage 2: legality.
+  const legal: PlayerBookPick[] = [];
+  let illegalCount = 0;
+  for (const c of raw) {
+    if (applyMove(fen, uciToObj(c.uci))) {
+      legal.push(c);
+    } else {
+      illegalCount++;
+      traceStep(trace, `Player book picker: rejected by legality: ${c.san} (${c.uci}) not applicable to ${fen}.`);
     }
   }
-  return null;
+
+  // Stage 3: result gate (wins > losses).
+  const resultSurvivors: PlayerBookPick[] = [];
+  let resultRejectedCount = 0;
+  for (const c of legal) {
+    if (isPlayerBookCandidateTakeable(c)) {
+      resultSurvivors.push(c);
+    } else {
+      resultRejectedCount++;
+      const net = c.wins - c.losses;
+      traceStep(trace, `Player book picker: rejected by result gate: ${c.san} W=${c.wins} D=${c.draws} L=${c.losses} net=${net} (threshold: net>0).`);
+    }
+  }
+
+  // Stage 4: WDL/cp engine gate via the shared helper. One parent eval reused.
+  const parentEval = resultSurvivors.length > 0 ? await getEngine() : null;
+  const enginePassed: Array<PlayerBookPick & { cpLoss: number | null; expectedScoreDrop: number | null; lossDelta: number | null }> = [];
+  const engineRejected: Array<PlayerBookPick & { judgment: CandidateJudgment }> = [];
+  for (const c of resultSurvivors) {
+    const j = await judgeCandidateAtFen(fen, c.uci, color, signal, parentEval);
+    if (j.passed) {
+      enginePassed.push({ ...c, cpLoss: j.cpLoss, expectedScoreDrop: j.expectedScoreDrop, lossDelta: j.lossDelta });
+    } else {
+      engineRejected.push({ ...c, judgment: j });
+      traceStep(trace, formatPlayerBookRejection(c, j));
+    }
+  }
+
+  if (enginePassed.length === 0) {
+    const best = pickBestEngineRejection(engineRejected);
+    const tail = best ? ` best rejected was ${best.san} ${formatRejectionMetrics(best.judgment)}.` : '';
+    traceStep(trace, `Player book ${label}: ${raw.length} raw moves; ${illegalCount} illegal; ${resultRejectedCount} rejected by result gate; ${engineRejected.length} rejected by engine gate.${tail}`);
+    return null;
+  }
+
+  // Stage 5: sort engine-passed candidates by `compareCandidates` and pick the top.
+  enginePassed.sort(comparePlayerBookCandidates);
+  const winner = enginePassed[0];
+  const cpStr = winner.cpLoss !== null ? ` cpLoss=${winner.cpLoss.toFixed(0)}` : '';
+  const wdlStr = winner.expectedScoreDrop !== null && winner.lossDelta !== null
+    ? ` expectedScoreDrop=${winner.expectedScoreDrop.toFixed(1)}‰ lossDelta=${winner.lossDelta.toFixed(1)}‰`
+    : '';
+  traceStep(trace, `Player book ${label}: ${raw.length} raw moves; ${illegalCount} illegal; ${resultRejectedCount} rejected by result gate; ${engineRejected.length} rejected by engine gate; selected ${winner.san} (${winner.uci})${wdlStr}${cpStr}.`);
+  return { ...winner, cpLoss: winner.cpLoss };
+}
+
+function formatPlayerBookRejection(c: PlayerBookPick, j: CandidateJudgment): string {
+  if (j.verdict === 'mate-lost') {
+    return `Player book picker: rejected by mate-lost guard: ${c.san}; winning mate ${j.bestSan ?? j.bestUci ?? '?'} was available.`;
+  }
+  if (j.verdict === 'wdl') {
+    const cpStr = j.cpLoss !== null ? ` cpLoss=${j.cpLoss.toFixed(0)}` : '';
+    return `Player book picker: rejected by WDL gate: ${c.san} (${c.uci}) bestWdl=${fmtWdl(j.bestWdl)} playedWdl=${fmtWdl(j.playedWdl)} expectedScoreDrop=${j.expectedScoreDrop!.toFixed(1)}‰ (max ${TUNING.maxWdlExpectedScoreDrop}) lossDelta=${j.lossDelta!.toFixed(1)}‰ (max ${TUNING.maxWdlLossDelta})${cpStr} — ${j.classification.toUpperCase()}.`;
+  }
+  if (j.verdict === 'cp-fallback') {
+    return `Player book picker: rejected by cp fallback: ${c.san} cpLoss=${j.cpLoss!.toFixed(0)} > maxCpLossFallbackPerMove (${TUNING.maxCpLossFallbackPerMove}) — investigate UCI_ShowWDL.`;
+  }
+  // 'engine-unavailable' / 'engine-unavailable-child' branches return passed=true,
+  // so they don't reach this formatter. Defensive fallback:
+  return `Player book picker: rejected ${c.san} (${c.uci}) verdict=${j.verdict} classification=${j.classification}.`;
+}
+
+function pickBestEngineRejection(rejected: Array<PlayerBookPick & { judgment: CandidateJudgment }>): (PlayerBookPick & { judgment: CandidateJudgment }) | null {
+  if (rejected.length === 0) return null;
+  // "Best" = smallest expected-score drop (or cp-loss when WDL absent).
+  return [...rejected].sort((a, b) => {
+    const ad = a.judgment.expectedScoreDrop ?? a.judgment.cpLoss ?? Number.POSITIVE_INFINITY;
+    const bd = b.judgment.expectedScoreDrop ?? b.judgment.cpLoss ?? Number.POSITIVE_INFINITY;
+    return ad - bd;
+  })[0];
+}
+
+function formatRejectionMetrics(j: CandidateJudgment): string {
+  if (j.verdict === 'wdl') {
+    return `expectedScoreDrop=${j.expectedScoreDrop!.toFixed(1)}‰ (over ${TUNING.maxWdlExpectedScoreDrop}) lossDelta=${j.lossDelta!.toFixed(1)}‰ (over ${TUNING.maxWdlLossDelta})`;
+  }
+  if (j.verdict === 'cp-fallback') {
+    return `cpLoss=${j.cpLoss!.toFixed(0)} (over ${TUNING.maxCpLossFallbackPerMove})`;
+  }
+  if (j.verdict === 'mate-lost') return 'mate-lost';
+  return j.verdict;
+}
+
+function fmtWdl(w: WdlVec | null): string {
+  return w ? `${w.win}/${w.draw}/${w.loss}` : '?/?/?';
 }
 
 function playerBookPickToYourMove(playerPick: PlayerBookPick & { cpLoss?: number | null }): YourMovePick {
@@ -319,30 +458,6 @@ async function pickDatabaseMove(
     popularityFraction: winner.total > 0 ? winner.total / sumTotals(candidates) : 0,
     winRate: decisivenessRate(winner),
   };
-}
-
-async function candidateCpLoss(
-  fen: NormFen,
-  uci: string,
-  color: Color,
-  getEngine: () => Promise<CloudEvalResponse | null>,
-  signal?: AbortSignal
-): Promise<number | null> {
-  const engine = await getEngine();
-  if (!engine || engine.pvs.length === 0) return null;
-  const bestCp = pvCpForColor(engine.pvs[0], color);
-  if (bestCp === null) return null;
-  const pv = findPvForMove(engine, uci);
-  if (pv) {
-    const cp = pvCpForColor(pv, color);
-    return cp === null ? null : bestCp - cp;
-  }
-  const attempted = applyMove(fen, uciToObj(uci));
-  if (!attempted) return null;
-  const post = await fetchCloudEval(attempted.fen, 1, TUNING.engineDepthLineGen, signal);
-  if (!post || post.pvs.length === 0) return null;
-  const postCp = pvCpForColor(post.pvs[0], color);
-  return postCp === null ? null : bestCp - postCp;
 }
 
 function sumTotals(arr: MovePop[]): number {
@@ -426,7 +541,7 @@ export interface MoveEvaluation {
 }
 
 export async function evaluateMoveCpLoss(fen: NormFen, attemptedUci: string, signal?: AbortSignal): Promise<MoveEvaluation> {
-  const engine = await fetchCloudEval(fen, TUNING.cloudEvalMultiPv, TUNING.engineDepthLineGen, signal);
+  const engine = await fetchLocalEval(fen, TUNING.cloudEvalMultiPv, TUNING.engineDepthLineGen, signal);
   const attempted = applyMove(fen, uciToObj(attemptedUci));
   const attemptedSan = attempted?.san ?? null;
   if (!engine || engine.pvs.length === 0) return { cpLoss: null, best: null, attemptedSan };
@@ -445,7 +560,7 @@ export async function evaluateMoveCpLoss(fen: NormFen, attemptedUci: string, sig
     return { cpLoss: bestCp - cp, best, attemptedSan };
   }
   if (!attempted) return { cpLoss: null, best, attemptedSan };
-  const post = await fetchCloudEval(attempted.fen, 1, TUNING.engineDepthLineGen, signal);
+  const post = await fetchLocalEval(attempted.fen, 1, TUNING.engineDepthLineGen, signal);
   if (!post || post.pvs.length === 0) return { cpLoss: null, best, attemptedSan };
   const postCp = pvCpForColor(post.pvs[0], mover);
   if (postCp === null) return { cpLoss: null, best, attemptedSan };
@@ -466,78 +581,340 @@ export function maxAllowedDropPawns(startPawns: number): number {
   return 3.0;
 }
 
+// ---------- WDL helpers (Win / Draw / Loss probability) ----------
+
+// Per-mille vector: each value 0..1000, summing to 1000. Reported by Stockfish
+// when UCI_ShowWDL is enabled. Always from the side-to-move's perspective at
+// the position being evaluated — so if we evaluate a position where the user
+// is to move, the engine reports the user's W/D/L if it plays the PV.
+export type WdlVec = { win: number; draw: number; loss: number };
+
+// Expected score in per-mille (0..1000). 1000 = guaranteed win,
+// 0 = guaranteed loss, 500 = balanced. Used as the primary line-quality gate
+// because it correctly distinguishes "this move drops practical chances" from
+// "this move barely changes anything." Centipawn loss conflates these.
+export function expectedScoreFromWdl(w: WdlVec): number {
+  return w.win + 0.5 * w.draw;
+}
+
+// Invert a WDL vector to the opposite color's perspective. Win and loss swap;
+// draw is unchanged. Needed when we evaluate a position from the opponent's
+// side-to-move and want to project the user's W/D/L.
+function invertWdl(w: WdlVec): WdlVec {
+  return { win: w.loss, draw: w.draw, loss: w.win };
+}
+
+// ---------- Line-quality gate ----------
+
+export type MoveClassification =
+  | 'best'        // ~no loss
+  | 'good'        // small loss, well within thresholds
+  | 'inaccuracy'  // visible loss but passes the gate
+  | 'mistake'     // fails the gate by exceeding wdl/cp thresholds
+  | 'blunder'     // fails the gate by a large margin
+  | 'mateLost'   // played a non-mate when a winning mate existed
+  | 'unknown';    // could not measure (engine unavailable for this position)
+
+export interface UserMoveQuality {
+  ply: number;           // index in fullPath
+  san: string;           // played SAN
+  uci: string;
+  parentFen: NormFen;
+  bestUci: string | null;
+  bestSan: string | null;
+  // WDL path (primary). null when WDL is not available from the engine output.
+  bestWdl: WdlVec | null;
+  playedWdl: WdlVec | null;
+  expectedScoreDrop: number | null;  // per-mille, >0 means played worse than best
+  lossDelta: number | null;          // per-mille, >0 means more loss probability
+  // cp-loss (always reported when available) — used as fallback gate.
+  bestCp: number | null;
+  playedCp: number | null;
+  cpLoss: number | null;             // centipawns, >0 means played worse
+  classification: MoveClassification;
+  passed: boolean;
+  reason: string;
+}
+
 export interface LineQualityResult {
   passed: boolean;
-  startCp: number | null;
-  endCp: number | null;
-  dropCp: number | null;
-  thresholdCp: number;
+  moves: UserMoveQuality[];
+  worst: UserMoveQuality | null;
   reason: string;
   mateLost: boolean;
+  // Worst single-move cp loss, kept for backward-compat with the ReadyLine.qualityDropCp
+  // column that's displayed in the line-queue UI. Null when not measurable.
+  dropCp: number | null;
+  // The old start/end/threshold fields are preserved for type-shape stability but
+  // are no longer populated by the per-move gate (always null/0).
+  startCp: number | null;
+  endCp: number | null;
+  thresholdCp: number;
 }
 
 function isWinningMate(cp: number | null): boolean {
   return cp !== null && cp > 90000;
 }
 
-// Re-evaluate the start and end positions of a generated line at TUNING.engineDepthGate
-// and decide whether the line passed the quality gate.
-//
-// Pass conditions (in order):
-//  1. If start is a winning mate and end is not → FAIL (mate lost).
-//  2. If either eval is unavailable → SKIP (treated as pass; can't judge what we can't measure).
-//  3. If (startCp - endCp) > thresholdFromMaxAllowedDropPawns(startCp) → FAIL.
-//  4. Otherwise → PASS.
-//
-// Every decision is written to the GenerationTrace so it appears in the train UI's
-// trace panel and the copy-paste log.
+// Tag for which gate path produced the pass/fail decision. Used by callers
+// (per-move quality gate and player-book picker) to format trace strings.
+export type CandidateGateVerdict =
+  | 'engine-unavailable'        // parent multi-PV missing — unmeasurable, passed defaulted true
+  | 'engine-unavailable-child'  // played move outside multi-PV AND child eval missing — unmeasurable
+  | 'mate-lost'                 // best PV is a winning mate, played move isn't — failed
+  | 'wdl'                       // WDL gate decided the verdict
+  | 'cp-fallback';              // cp-loss gate decided (WDL absent)
+
+// Shared numeric judgment used by both the per-move quality gate
+// (`evaluateUserMove`) and the player-book picker
+// (`pickEngineSafePlayerBookMove`). Caller supplies the multi-PV parent eval
+// so that several candidates at the same parent FEN can reuse one fetch.
+export interface CandidateJudgment {
+  bestUci: string | null;
+  bestSan: string | null;
+  bestWdl: WdlVec | null;
+  playedWdl: WdlVec | null;
+  expectedScoreDrop: number | null;
+  lossDelta: number | null;
+  bestCp: number | null;
+  playedCp: number | null;
+  cpLoss: number | null;
+  classification: MoveClassification;
+  passed: boolean;
+  verdict: CandidateGateVerdict;
+}
+
+// Single source of truth for the WDL/cp-fallback/mate-loss gate. Picker and
+// quality gate both delegate here so a candidate that survives the picker is
+// guaranteed to survive the gate (modulo parent-eval depth, which is
+// equalised by setting `engineDepthSelect === engineDepthGate`).
+async function judgeCandidateAtFen(
+  parentFen: NormFen,
+  uci: string,
+  color: Color,
+  signal: AbortSignal | undefined,
+  parentEval: CloudEvalResponse | null,
+): Promise<CandidateJudgment> {
+  const base: CandidateJudgment = {
+    bestUci: null, bestSan: null,
+    bestWdl: null, playedWdl: null,
+    expectedScoreDrop: null, lossDelta: null,
+    bestCp: null, playedCp: null, cpLoss: null,
+    classification: 'unknown',
+    passed: true,
+    verdict: 'engine-unavailable',
+  };
+  if (!parentEval || parentEval.pvs.length === 0) return base;
+
+  const bestPv = parentEval.pvs[0];
+  base.bestCp = pvCpForColor(bestPv, color);
+  base.bestWdl = bestPv.wdl ?? null;
+  base.bestUci = bestPv.moves.split(' ')[0] || null;
+  if (base.bestUci) {
+    const bestApplied = applyMove(parentFen, uciToObj(base.bestUci));
+    base.bestSan = bestApplied?.san ?? base.bestUci;
+  }
+
+  // Played move's metrics: prefer in-multi-PV, else evaluate child and invert.
+  const playedPv = findPvForMove(parentEval, uci);
+  if (playedPv) {
+    base.playedCp = pvCpForColor(playedPv, color);
+    base.playedWdl = playedPv.wdl ?? null;
+  } else {
+    const applied = applyMove(parentFen, uciToObj(uci));
+    if (!applied) {
+      base.verdict = 'engine-unavailable-child';
+      return base;
+    }
+    const childEval = await fetchLocalEval(applied.fen as NormFen, 1, TUNING.engineDepthGate, signal);
+    if (childEval && childEval.pvs.length > 0) {
+      const childTop = childEval.pvs[0];
+      base.playedCp = pvCpForColor(childTop, color);
+      base.playedWdl = childTop.wdl ? invertWdl(childTop.wdl) : null;
+    } else {
+      base.verdict = 'engine-unavailable-child';
+      return base;
+    }
+  }
+
+  if (base.bestCp !== null && base.playedCp !== null) {
+    base.cpLoss = base.bestCp - base.playedCp;
+  }
+  if (base.bestWdl && base.playedWdl) {
+    base.expectedScoreDrop = expectedScoreFromWdl(base.bestWdl) - expectedScoreFromWdl(base.playedWdl);
+    base.lossDelta = base.playedWdl.loss - base.bestWdl.loss;
+  }
+
+  if (isWinningMate(base.bestCp) && !isWinningMate(base.playedCp)) {
+    base.classification = 'mateLost';
+    base.passed = false;
+    base.verdict = 'mate-lost';
+    return base;
+  }
+
+  if (base.expectedScoreDrop !== null && base.lossDelta !== null) {
+    const failed = base.expectedScoreDrop > TUNING.maxWdlExpectedScoreDrop
+                || base.lossDelta > TUNING.maxWdlLossDelta;
+    base.classification = classifyByWdl(base.expectedScoreDrop, base.lossDelta);
+    base.passed = !failed;
+    base.verdict = 'wdl';
+    return base;
+  }
+
+  if (base.cpLoss !== null) {
+    const failed = base.cpLoss > TUNING.maxCpLossFallbackPerMove;
+    base.classification = classifyByCpLoss(base.cpLoss);
+    base.passed = !failed;
+    base.verdict = 'cp-fallback';
+    return base;
+  }
+
+  base.verdict = 'engine-unavailable-child';
+  return base;
+}
+
+// Evaluate ONE user move's quality vs the engine's best at the parent FEN.
+// Thin wrapper over the shared `judgeCandidateAtFen` helper that adds
+// edge-aware trace prose. Delegating here keeps the picker and the gate on
+// identical numerics — see DO NOT bullet in docs/line-selection.md.
+async function evaluateUserMove(
+  edge: Edge,
+  ply: number,
+  color: Color,
+  signal: AbortSignal | undefined,
+  trace?: GenerationTrace
+): Promise<UserMoveQuality> {
+  const parentFen = edge.parentFen as NormFen;
+  const parentEval = await fetchLocalEval(parentFen, TUNING.cloudEvalMultiPv, TUNING.engineDepthGate, signal);
+  if (!parentEval || parentEval.pvs.length === 0) {
+    traceStep(trace, `Quality gate: engine unavailable at ${edge.san} (parentFen=${parentFen}); skipping this move.`);
+  }
+  const j = await judgeCandidateAtFen(parentFen, edge.uci, color, signal, parentEval);
+  const { verdict, ...common } = j;
+
+  let reason: string;
+  switch (verdict) {
+    case 'engine-unavailable':
+      reason = 'Engine unavailable; this move could not be judged.';
+      break;
+    case 'engine-unavailable-child':
+      traceStep(trace, `Quality gate: engine unavailable at child position for ${edge.san} (childFen=${edge.childFen}); cannot score this move.`);
+      reason = 'Engine unavailable for follow-up eval; this move could not be judged.';
+      break;
+    case 'mate-lost':
+      reason = `Played ${edge.san} but a winning mate (${j.bestSan ?? j.bestUci}) was available.`;
+      break;
+    case 'wdl': {
+      const dropStr = `expectedDrop=${j.expectedScoreDrop!.toFixed(1)} (max ${TUNING.maxWdlExpectedScoreDrop})`;
+      const lossStr = `lossDelta=${j.lossDelta!.toFixed(1)} (max ${TUNING.maxWdlLossDelta})`;
+      const cpStr = j.cpLoss !== null ? ` cpLoss=${j.cpLoss.toFixed(0)}` : '';
+      reason = j.passed
+        ? `Played ${edge.san}: ${dropStr}, ${lossStr}${cpStr} — ${j.classification}.`
+        : `Played ${edge.san}: ${dropStr}, ${lossStr}${cpStr} — ${j.classification.toUpperCase()}.`;
+      break;
+    }
+    case 'cp-fallback':
+      reason = j.passed
+        ? `Played ${edge.san}: cpLoss=${j.cpLoss!.toFixed(0)} (no WDL) — ${j.classification}.`
+        : `Played ${edge.san}: cpLoss=${j.cpLoss!.toFixed(0)} > ${TUNING.maxCpLossFallbackPerMove} (no WDL) — ${j.classification.toUpperCase()}.`;
+      break;
+  }
+
+  return { ply, san: edge.san, uci: edge.uci, parentFen, ...common, reason };
+}
+
+function classifyByWdl(expectedScoreDrop: number, lossDelta: number): MoveClassification {
+  const worst = Math.max(expectedScoreDrop, lossDelta);
+  if (worst <= 10) return 'best';
+  if (worst <= TUNING.maxWdlExpectedScoreDrop) return 'good';
+  if (worst <= 80) return 'inaccuracy';
+  if (worst <= 150) return 'mistake';
+  return 'blunder';
+}
+
+function classifyByCpLoss(cpLoss: number): MoveClassification {
+  if (cpLoss <= 10) return 'best';
+  if (cpLoss < 50) return 'good';
+  if (cpLoss < TUNING.maxCpLossFallbackPerMove) return 'inaccuracy';
+  if (cpLoss < 300) return 'mistake';
+  return 'blunder';
+}
+
+// Walk every user-color move in the generated portion of the line and judge
+// it individually. The line FAILS the gate iff any user move fails (WDL
+// thresholds when available, cp-loss fallback otherwise). Moves whose engine
+// eval is unavailable are skipped (treated as pass, can't judge what we can't
+// measure) — but at least one judgeable move is required for a verdict.
 export async function evaluateLineQuality(
-  startFen: NormFen,
-  endFen: NormFen,
+  line: GeneratedLine,
   color: Color,
   signal?: AbortSignal,
   trace?: GenerationTrace
 ): Promise<LineQualityResult> {
-  if (startFen === endFen) {
-    const r: LineQualityResult = { passed: true, startCp: null, endCp: null, dropCp: null,
-      thresholdCp: 0, reason: 'Start and end FEN identical; gate trivially passes', mateLost: false };
-    traceStep(trace, `Quality gate: SKIP — ${r.reason}.`);
-    return r;
+  const generated = line.fullPath.slice(line.generationStartIndex);
+  const userEdges: { edge: Edge; ply: number }[] = [];
+  for (let i = 0; i < generated.length; i++) {
+    const edge = generated[i];
+    if (edge.mover === color) userEdges.push({ edge, ply: line.generationStartIndex + i });
   }
-  traceStep(trace, `Quality gate: deep-eval start=${startFen} and end=${endFen} at depth ${TUNING.engineDepthGate}.`);
-  const [startEval, endEval] = await Promise.all([
-    fetchCloudEval(startFen, 1, TUNING.engineDepthGate, signal),
-    fetchCloudEval(endFen,   1, TUNING.engineDepthGate, signal),
-  ]);
-  const startCp = startEval && startEval.pvs[0] ? pvCpForColor(startEval.pvs[0], color) : null;
-  const endCp   = endEval   && endEval.pvs[0]   ? pvCpForColor(endEval.pvs[0],   color) : null;
 
-  const startWinMate = isWinningMate(startCp);
-  const endWinMate   = isWinningMate(endCp);
-  if (startWinMate && !endWinMate) {
-    const r: LineQualityResult = { passed: false, startCp, endCp, dropCp: null,
-      thresholdCp: 0, reason: `Lost a winning mate (startCp=${startCp}, endCp=${endCp})`, mateLost: true };
-    traceStep(trace, `Quality gate: FAIL — ${r.reason}.`);
-    return r;
+  const passResult = (reason: string): LineQualityResult => ({
+    passed: true, moves: [], worst: null, reason, mateLost: false,
+    dropCp: null, startCp: null, endCp: null, thresholdCp: 0,
+  });
+
+  if (userEdges.length === 0) {
+    traceStep(trace, `Quality gate: SKIP — no user moves in generated portion of the line.`);
+    return passResult('No user moves in generated portion');
   }
-  if (startCp === null || endCp === null) {
-    const r: LineQualityResult = { passed: true, startCp, endCp, dropCp: null,
-      thresholdCp: 0, reason: `No engine eval available (startCp=${startCp}, endCp=${endCp}); gate skipped`, mateLost: false };
-    traceStep(trace, `Quality gate: SKIP — ${r.reason}.`);
-    return r;
+
+  traceStep(trace, `Quality gate: walking ${userEdges.length} user move${userEdges.length === 1 ? '' : 's'} at depth ${TUNING.engineDepthGate}.`);
+
+  const moves: UserMoveQuality[] = [];
+  for (const { edge, ply } of userEdges) {
+    if (signal?.aborted) {
+      traceStep(trace, `Quality gate: aborted mid-walk after ${moves.length} of ${userEdges.length} user moves.`);
+      break;
+    }
+    const m = await evaluateUserMove(edge, ply, color, signal, trace);
+    moves.push(m);
+    traceStep(trace, `Quality gate: move ${ply + 1} (${edge.san}) → ${m.reason}`);
+    // Short-circuit on first hard failure so we don't waste evals.
+    if (!m.passed) break;
   }
-  const startPawns = startCp / 100;
-  const thresholdPawns = maxAllowedDropPawns(startPawns);
-  const thresholdCp = thresholdPawns * 100;
-  const dropCp = startCp - endCp;
-  const dropPawns = dropCp / 100;
-  const passed = dropCp <= thresholdCp;
-  const reason = passed
-    ? `Drop ${dropPawns.toFixed(2)} <= threshold ${thresholdPawns.toFixed(2)} (start ${startPawns.toFixed(2)} -> end ${(endCp / 100).toFixed(2)})`
-    : `Drop ${dropPawns.toFixed(2)} > threshold ${thresholdPawns.toFixed(2)} (start ${startPawns.toFixed(2)} -> end ${(endCp / 100).toFixed(2)})`;
-  const r: LineQualityResult = { passed, startCp, endCp, dropCp, thresholdCp, reason, mateLost: false };
-  traceStep(trace, `Quality gate: ${passed ? 'PASS' : 'FAIL'} — ${reason}.`);
-  return r;
+
+  // Worst move = lowest-quality among judged moves. Mate-loss > blunder > mistake > inaccuracy > good > best.
+  const severity: Record<MoveClassification, number> = {
+    mateLost: 6, blunder: 5, mistake: 4, inaccuracy: 3, good: 2, best: 1, unknown: 0,
+  };
+  let worst: UserMoveQuality | null = null;
+  for (const m of moves) {
+    if (!worst || severity[m.classification] > severity[worst.classification]) worst = m;
+  }
+
+  const failedMove = moves.find(m => !m.passed) ?? null;
+  const mateLost = moves.some(m => m.classification === 'mateLost');
+  const dropCp = worst && worst.cpLoss !== null ? worst.cpLoss : null;
+
+  if (failedMove) {
+    const reason = failedMove.reason;
+    traceStep(trace, `Quality gate: FAIL — ${reason}`);
+    return {
+      passed: false, moves, worst: failedMove, reason, mateLost,
+      dropCp, startCp: null, endCp: null, thresholdCp: 0,
+    };
+  }
+
+  // No hard failure. Surface inaccuracies as informational.
+  const inaccuracies = moves.filter(m => m.classification === 'inaccuracy');
+  const reason = inaccuracies.length > 0
+    ? `All user moves passed; ${inaccuracies.length} flagged as inaccuracy (${inaccuracies.map(m => m.san).join(', ')}).`
+    : 'All user moves passed.';
+  traceStep(trace, `Quality gate: PASS — ${reason}`);
+  return {
+    passed: true, moves, worst, reason, mateLost: false,
+    dropCp, startCp: null, endCp: null, thresholdCp: 0,
+  };
 }
 
 // ---------- Pick OPPONENT moves to enumerate ----------
@@ -696,13 +1073,13 @@ export async function pickOpponentMoves(fen: NormFen, signal?: AbortSignal, trac
     return opponentMovesFromStockfish(fen, signal, trace, depth);
   }
 
-  const engine = await fetchCloudEval(fen, TUNING.cloudEvalMultiPv, depth, signal);
+  const engine = await fetchLocalEval(fen, TUNING.cloudEvalMultiPv, depth, signal);
   return opponentMovesFromExplorer(fen, resp, total, engine, trace);
 }
 
 async function opponentMovesFromStockfish(fen: NormFen, signal?: AbortSignal, trace?: GenerationTrace, depth: number = TUNING.engineDepthLineGen): Promise<OpponentMove[]> {
   traceStep(trace, `Stockfish fallback: requesting ${TUNING.cloudEvalMultiPv} PVs at ${fen}`);
-  const engine = await fetchCloudEval(fen, TUNING.cloudEvalMultiPv, depth, signal);
+  const engine = await fetchLocalEval(fen, TUNING.cloudEvalMultiPv, depth, signal);
   if (!engine || engine.pvs.length === 0) {
     traceStep(trace, 'Stockfish fallback: no engine PVs returned.');
     return [];
@@ -804,7 +1181,7 @@ export interface PathStep {
   source?: FrontierSource;
 }
 
-interface FrontierScope {
+export interface FrontierScope {
   key: string;
   openingKey: string | null;
   openingName: string | null;
@@ -845,14 +1222,31 @@ function scopeFromStart(rep: Repertoire, openingScope: GenerationOpeningScope | 
 // inputs the UI has on hand (no async DB walk needed). Used by the ready-line cache so
 // that build/lookup keys stay in sync with the generator's internal scoping.
 export function computeScopeKey(rep: Repertoire, openingScope: GenerationOpeningScope | null): string | null {
-  if (!openingScope) return 'root';
+  const scope = scopeFromOpening(rep, openingScope);
+  return scope ? scope.key : null;
+}
+
+// Public helper: build the full FrontierScope synchronously from the same
+// inputs the UI has on hand. Used by the scoped-frontier views in TrainMode
+// so `frontierInScope` (which needs `startFen` for the path check, not just
+// the scope key) can be applied client-side. Returns null when the
+// openingScope's SAN moves don't apply cleanly from STARTING_FEN_NORM —
+// caller should treat that as no scope.
+export function scopeFromOpening(rep: Repertoire, openingScope: GenerationOpeningScope | null): FrontierScope | null {
+  if (!openingScope) return rootScope(rep);
   let startFen: NormFen = STARTING_FEN_NORM;
   for (const move of openingScope.moves) {
     const r = applyMove(startFen, move);
-    if (!r) return null; // invalid opening definition; caller should treat as no scope
+    if (!r) return null;
     startFen = r.fen;
   }
-  return `${rep.color}:${openingScope.key}:${rep.rootFen}:${startFen}`;
+  return {
+    key: `${rep.color}:${openingScope.key}:${rep.rootFen}:${startFen}`,
+    openingKey: openingScope.key,
+    openingName: openingScope.name,
+    rootFen: rep.rootFen,
+    startFen,
+  };
 }
 
 function scopedFrontierId(rep: Repertoire, frontier: Pick<DiscoveredFrontier, 'parentFen' | 'uci'>, scope: FrontierScope): string {
@@ -879,7 +1273,7 @@ function scopedFrontierId(rep: Repertoire, frontier: Pick<DiscoveredFrontier, 'p
 // representing an unanswered immediate reply at the scope endpoint). When the
 // scope is the root (no opening filter), startFen === rootFen and every
 // frontier passes by definition.
-function frontierInScope(frontier: FrontierCandidate, scope: FrontierScope): boolean {
+export function frontierInScope(frontier: FrontierCandidate, scope: FrontierScope): boolean {
   if ((frontier.scopeKey ?? 'root') !== scope.key) return false;
   if (scope.startFen === scope.rootFen) return true;
   if (frontier.parentFen === scope.startFen) return true;
@@ -1592,12 +1986,17 @@ export async function generateLearnLineOnce(
   const generationStartIndex = fullPath.length;
   let yourMovesAdded = 0;
   let activeSourceLine: ActiveSourceLine | null = null;
+  // Why the extension loop exited. Drives the post-loop length check: only
+  // 'budget-reached' or 'game-over' are acceptable terminations for a published
+  // line. Anything else means the loop bailed early and we'd be publishing a stub.
+  let terminationReason: 'budget-reached' | 'game-over' | 'no-user-move' | 'no-opponent-move' | 'top-opponent-edge-missing' | 'aborted' = 'budget-reached';
   while (yourMovesAdded < yourMoveBudget) {
-    if (signal?.aborted) break;
+    if (signal?.aborted) { terminationReason = 'aborted'; break; }
     const turn = turnAt(cursorFen);
     traceStep(trace, `Line generation: extension loop at ${cursorFen}; turn=${turn}; yourMovesAdded=${yourMovesAdded}/${yourMoveBudget}.`);
     if (chessFromFen(cursorFen).isGameOver()) {
       traceStep(trace, 'Line generation: stopped because position is game-over.');
+      terminationReason = 'game-over';
       break;
     }
 
@@ -1629,12 +2028,14 @@ export async function generateLearnLineOnce(
       }
       if (!pick) {
         traceStep(trace, `Line generation: no legal user move available at ${cursorFen}.`);
+        terminationReason = 'no-user-move';
         break;
       }
       traceStep(trace, `Line generation: picked user move ${pick.san} (${pick.uci}) from ${pick.source}.`);
       const played = await playPickedUserMove(rep, cursorFen, pick);
       if (!played) {
         traceStep(trace, `Line generation: could not play picked user move ${pick.san} at ${cursorFen}.`);
+        terminationReason = 'no-user-move';
         break;
       }
       fullPath.push(played.edge);
@@ -1666,6 +2067,7 @@ export async function generateLearnLineOnce(
       const opMoves = await pickOpponentMoves(cursorFen, signal, trace);
       if (opMoves.length === 0) {
         traceStep(trace, `Line generation: opponent picker returned zero moves at ${cursorFen}.`);
+        terminationReason = 'no-opponent-move';
         break;
       }
       const sorted = [...opMoves].sort((a, b) => b.popularityFraction - a.popularityFraction);
@@ -1694,6 +2096,7 @@ export async function generateLearnLineOnce(
       }
       if (!topEdge) {
         traceStep(trace, `Line generation: top opponent edge was not created/found for ${top.san} (${top.uci}).`);
+        terminationReason = 'top-opponent-edge-missing';
         break;
       }
       fullPath.push(topEdge);
@@ -1704,6 +2107,16 @@ export async function generateLearnLineOnce(
   if (yourMovesAdded === 0) {
     traceStep(trace, 'Line generation: failed because zero user moves were added.');
     throw new FrontierGenerationError('Line generation could not add a user move from this frontier.', activeFrontierId);
+  }
+  // Strict length invariant: the line must reach the user's configured budget exactly,
+  // unless the game ended naturally (mate, stalemate, threefold, fifty-move,
+  // insufficient material — all covered by chess.js's isGameOver()). Anything else
+  // means the loop bailed early on a real problem (no popular opponent reply, no
+  // legal user move, etc.) and we'd be publishing a stub instead of a learnable line.
+  if (yourMovesAdded < yourMoveBudget && terminationReason !== 'game-over') {
+    const message = `Line generation produced ${yourMovesAdded} of ${yourMoveBudget} user moves (terminated: ${terminationReason}). Refusing to publish a stub line.`;
+    traceStep(trace, `Line generation: ${message}`);
+    throw new FrontierGenerationError(message, activeFrontierId);
   }
   if (activeFrontierId) {
     await markFrontierAnswered(activeFrontierId, 'Line generation added at least one user move from this frontier.');
@@ -1717,14 +2130,19 @@ export async function generateLearnLineOnce(
   return { fullPath, newEdges, generationStartIndex, frontierId: activeFrontierId, frontierFen: activeFrontierFen, selectionReason: frontier.reason };
 }
 
-// Quality-gated wrapper around generateLearnLineOnce. Generates a line, then
-// deep-evaluates its start and end FENs at TUNING.engineDepthGate and logs
-// PASS/FAIL with full reasoning. The line is returned regardless — the gate is a
-// diagnostic, not a rejection. Failures show up in the trace panel and the
-// copy-paste log so you can see exactly why a line is leaking advantage.
+// Quality-gated wrapper around generateLearnLineOnce. Generates ONE line, then
+// deep-evaluates its start and end FENs at TUNING.engineDepthGate and either
+// returns the line on PASS or rejects it on FAIL.
 //
-// On FAIL, the wrapper rolls back generated edges, marks the specific frontier
-// blocked after rollback, and lets the next attempt select another indexed candidate.
+// Single-attempt by design. The picker is deterministic per FEN ([docs/line-selection.md
+// "We don't actually retry on FAIL because pickYourMove is deterministic"]), so a
+// second attempt within the same run would reproduce the same line. The previous
+// blocked-frontier workaround that altered retry behavior has been removed —
+// rejections now surface as a failure report for the user to investigate.
+//
+// Before any work: ping local Stockfish to confirm the depth-sensitive eval path
+// is live, and auto-clear any historical blocked frontiers from prior runs so
+// the repertoire self-heals after this version transition.
 export async function generateLearnLine(
   rep: Repertoire,
   yourMoveBudget = 5,
@@ -1732,11 +2150,28 @@ export async function generateLearnLine(
   trace?: GenerationTrace,
   openingScope?: GenerationOpeningScope | null
 ): Promise<GeneratedLine | null> {
+  // Local Stockfish health probe. Cheap (depth 6, starting position is cached after
+  // first call) and converts the silent-degradation failure mode — every eval call
+  // returns null mid-line and the line truncates — into a loud actionable error.
+  const probe = await fetchLocalEval(STARTING_FEN_NORM, 1, 6, signal);
+  if (!probe) {
+    const msg = `Local Stockfish unreachable at /api/stockfish/eval. The Vite dev server (npm run dev) or the standalone server (npm start) must be running for line generation.`;
+    traceStep(trace, msg);
+    return null;
+  }
+
+  // One-shot auto-clean: any frontiers left in 'blocked' from prior runs are
+  // returned to 'open' so they can be retried under the current engine/threshold
+  // settings. The blocked-frontier mechanism is otherwise unused going forward —
+  // this exists for migration only and is idempotent.
+  const cleared = await clearBlockedFrontiersForRepertoire(rep.id);
+  if (cleared > 0) {
+    traceStep(trace, `Cleared ${cleared} stale blocked frontier${cleared === 1 ? '' : 's'} from prior runs.`);
+  }
+
   const deadline = Date.now() + TUNING.qualityGateTimeoutMs;
   let lastFailure = 'No attempts were run.';
   let activeScope: FrontierScope | null = null;
-  let activeStart: GenerationStart | null = null;
-  let unblockedFailureCount = 0;
   let attemptedCandidates = 0;
   let failedQualityGate = 0;
   let failedNoUserMove = 0;
@@ -1745,10 +2180,9 @@ export async function generateLearnLine(
     const preflightStart = await prepareGenerationStart(rep, openingScope ?? null, trace);
     const preflightScope = scopeFromStart(rep, openingScope ?? null, preflightStart);
     activeScope = preflightScope;
-    activeStart = preflightStart;
     const existingOpen = await getOpenFrontiers(rep.id, preflightScope.key);
     if (existingOpen.length === 0) {
-      traceStep(trace, `Frontier index preflight: no open candidates for scope=${preflightScope.key}; searching for more candidates without unblocking rejected ones.`);
+      traceStep(trace, `Frontier index preflight: no open candidates for scope=${preflightScope.key}; searching for more candidates.`);
       await findTopUnansweredOpponentMove(rep, signal, trace, preflightStart, preflightScope, {
         clearFirst: false,
         maxNodes: TUNING.maxFrontierRebuildNodes,
@@ -1761,110 +2195,67 @@ export async function generateLearnLine(
     traceStep(trace, `Frontier index preflight failed: ${describeError(e)}`);
   }
 
-  for (let attempt = 1; ; attempt++) {
-    if (signal?.aborted) {
-      traceStep(trace, `Quality gate: aborted before attempt ${attempt}.`);
-      return null;
-    }
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) {
-      traceStep(trace, `Quality gate: timeout before attempt ${attempt} (${TUNING.qualityGateTimeoutMs / 1000}s wall clock).`);
-      break;
-    }
-    if (activeScope && attempt > 1) {
-      const openBeforeAttempt = await getOpenFrontiers(rep.id, activeScope.key);
-      if (openBeforeAttempt.length === 0) {
-        traceStep(trace, `Frontier index: no open candidates remain for scope=${activeScope.key}; running final search without unblocking rejected candidates.`);
-        const searchStart = activeStart ?? await prepareGenerationStart(rep, openingScope ?? null, trace);
-        await findTopUnansweredOpponentMove(rep, signal, trace, searchStart, activeScope, {
-          clearFirst: false,
-          maxNodes: TUNING.maxFrontierRebuildNodes,
-          maxExplorerCalls: TUNING.maxFrontierExplorerCalls,
-          reason: 'final-frontier-search',
-        });
-        const openAfterRebuild = await getOpenFrontiers(rep.id, activeScope.key);
-        if (openAfterRebuild.length === 0) {
-          lastFailure = 'No open frontier candidates remained after rebuild/search.';
-          traceStep(trace, `Frontier index: final search produced no open candidates for scope=${activeScope.key}.`);
-          break;
-        }
-      }
-    }
-
+  if (signal?.aborted) {
+    traceStep(trace, `Quality gate: aborted before attempt.`);
+    return null;
+  }
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) {
+    traceStep(trace, `Quality gate: timeout before attempt (${TUNING.qualityGateTimeoutMs / 1000}s wall clock).`);
+  } else {
     const snapshot = await snapshotGenerationState(rep.id);
     const attemptSignal = makeAttemptSignal(signal, remainingMs);
     let accepted = false;
-    let rejectedFrontierId: string | undefined;
-    let rejectedReason: string | undefined;
     try {
-      traceStep(trace, `Quality gate: attempt ${attempt} started; ${Math.ceil(remainingMs / 1000)}s remaining.`);
+      traceStep(trace, `Quality gate: attempt started; ${Math.ceil(remainingMs / 1000)}s remaining.`);
       const line = await generateLearnLineOnce(rep, yourMoveBudget, attemptSignal.signal, trace, openingScope);
       attemptedCandidates++;
       if (signal?.aborted) {
         lastFailure = 'Attempt aborted by parent signal.';
-        traceStep(trace, `Quality gate: attempt ${attempt} aborted by parent signal.`);
-        break;
-      }
-      if (!line) {
+        traceStep(trace, `Quality gate: aborted by parent signal.`);
+      } else if (!line) {
         if (attemptSignal.signal.aborted) {
           lastFailure = 'Attempt aborted.';
-          traceStep(trace, `Quality gate: attempt ${attempt} aborted.`);
-          break;
+          traceStep(trace, `Quality gate: aborted.`);
+        } else {
+          lastFailure = 'Generator returned no line.';
+          traceStep(trace, `Quality gate: generator produced no line.`);
         }
-        lastFailure = 'Generator returned no line.';
-        traceStep(trace, `Quality gate: attempt ${attempt} produced no line.`);
       } else {
         if (attemptSignal.signal.aborted) {
-          traceStep(trace, `Quality gate: attempt ${attempt} signal timed out, but a line was produced; evaluating it before discarding.`);
+          traceStep(trace, `Quality gate: signal timed out, but a line was produced; evaluating it before discarding.`);
         }
-        const startFen = line.fullPath[line.generationStartIndex - 1]?.childFen ?? rep.rootFen;
-        const endFen = line.fullPath[line.fullPath.length - 1]?.childFen ?? startFen;
-        const quality = await evaluateLineQuality(startFen, endFen, rep.color, signal, trace);
+        const quality = await evaluateLineQuality(line, rep.color, signal, trace);
         const respectsScope = assertLineRespectsScope(line, rep, openingScope ?? null, trace);
         if (quality.passed && respectsScope) {
           accepted = true;
-          traceStep(trace, `Quality gate: attempt ${attempt} accepted.`);
+          traceStep(trace, `Quality gate: accepted.`);
           return line;
         }
         lastFailure = respectsScope ? quality.reason : 'Generated line did not respect the selected opening scope.';
-        rejectedFrontierId = line.frontierId;
-        rejectedReason = `Quality gate rejected this generated line: ${lastFailure}`;
         failedQualityGate++;
-        traceStep(trace, `Quality gate: attempt ${attempt} rejected: ${lastFailure}`);
+        traceStep(trace, `Quality gate: rejected: ${lastFailure}`);
       }
     } catch (e) {
       if (attemptSignal.signal.aborted || signal?.aborted) {
         lastFailure = 'Attempt aborted.';
-        traceStep(trace, `Quality gate: attempt ${attempt} aborted during generation.`);
-        break;
-      }
-      if (e instanceof FrontierGenerationError) {
-        rejectedFrontierId = e.frontierId;
-        rejectedReason = e.message;
+        traceStep(trace, `Quality gate: aborted during generation.`);
+      } else if (e instanceof FrontierGenerationError) {
         if (e.message.toLowerCase().includes('user move')) failedNoUserMove++;
         else failedOther++;
         attemptedCandidates++;
+        lastFailure = describeError(e);
+        traceStep(trace, `Quality gate: generator threw: ${lastFailure}`);
       } else {
         failedOther++;
+        lastFailure = describeError(e);
+        traceStep(trace, `Quality gate: generator threw: ${lastFailure}`);
       }
-      lastFailure = describeError(e);
-      traceStep(trace, `Quality gate: attempt ${attempt} threw: ${lastFailure}`);
     } finally {
       attemptSignal.cleanup();
       if (!accepted) {
         const restored = await restoreGenerationState(rep.id, snapshot);
-        traceStep(trace, `Quality gate: rolled back attempt ${attempt}; deletedEdges=${restored.deletedEdges}, restoredEdges=${restored.restoredEdges}, deletedFrontiers=${restored.deletedFrontiers}, restoredFrontiers=${restored.restoredFrontiers}.`);
-        if (rejectedFrontierId && rejectedReason) {
-          await markFrontierBlocked(rejectedFrontierId, rejectedReason);
-          traceStep(trace, `Frontier index: marked ${rejectedFrontierId} blocked after rollback. reason=${rejectedReason}`);
-          unblockedFailureCount = 0;
-        } else {
-          unblockedFailureCount++;
-          if (unblockedFailureCount >= TUNING.qualityGateMaxAttempts) {
-            traceStep(trace, `Quality gate: stopping after ${unblockedFailureCount} failure(s) that were not tied to a specific frontier.`);
-            break;
-          }
-        }
+        traceStep(trace, `Quality gate: rolled back; deletedEdges=${restored.deletedEdges}, restoredEdges=${restored.restoredEdges}, deletedFrontiers=${restored.deletedFrontiers}, restoredFrontiers=${restored.restoredFrontiers}.`);
       }
     }
   }
@@ -1879,7 +2270,7 @@ export async function generateLearnLine(
     const counts = frontierStatusCounts(scoped);
     traceStep(trace, `Generation failure summary: scope=${activeScope.key}, attemptedCandidates=${attemptedCandidates}, failedQualityGate=${failedQualityGate}, failedNoUserMove=${failedNoUserMove}, failedOther=${failedOther}, totalKnownFrontiers=${scoped.length}, openFrontiers=${openFinal.length}, blockedFrontiers=${counts.blocked}, answeredFrontiers=${counts.answered}, generatedLineQueueSize=${readyFinal}, lastFailure=${lastFailure}`);
   }
-  traceStep(trace, `Quality gate: no acceptable line before frontier exhaustion or ${TUNING.qualityGateTimeoutMs / 1000}s timeout. Last failure: ${lastFailure}`);
+  traceStep(trace, `Quality gate: no acceptable line. Last failure: ${lastFailure}`);
   return null;
 }
 
@@ -2141,7 +2532,7 @@ export async function generateStockfishFallbackLine(
       // Opponent move: try cloud eval, fall back to Lichess explorer.
       let bestUci: string | null = null;
       traceStep(trace, 'Stockfish-only fallback: requesting engine move for opponent.');
-      const engine = await fetchCloudEval(cursorFen, TUNING.cloudEvalMultiPv, TUNING.engineDepthLineGen, signal);
+      const engine = await fetchLocalEval(cursorFen, TUNING.cloudEvalMultiPv, TUNING.engineDepthLineGen, signal);
       if (engine && engine.pvs.length > 0) {
         bestUci = engine.pvs[0].moves.split(' ')[0];
         traceStep(trace, `Stockfish-only fallback: engine opponent move ${bestUci}, depth=${engine.depth ?? 'unknown'}, pvs=${engine.pvs.length}.`);

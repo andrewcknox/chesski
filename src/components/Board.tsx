@@ -56,9 +56,11 @@ export function Board({
   const [dragOrigin, setDragOrigin] = useState<string | null>(null);
   const [markedSquares, setMarkedSquares] = useState<Set<string>>(() => new Set());
   const [userArrows, setUserArrows] = useState<BoardProps['arrows']>([]);
+  const boardWrapRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ startX: number; startY: number; startSize: number; frame: number | null } | null>(null);
   const clickHandledRef = useRef<number>(0);
   const rightDragStartRef = useRef<string | null>(null);
+  const leftPointerRef = useRef<{ x: number; y: number } | null>(null);
   const previousFenRef = useRef<NormFen>(fen);
   const boardTheme = BOARD_THEME_OPTIONS.find(theme => theme.key === preferences.boardTheme) ?? BOARD_THEME_OPTIONS[0];
   const customPieces = useMemo(() => buildCustomPieces(preferences.pieceSet), [preferences.pieceSet]);
@@ -85,6 +87,15 @@ export function Board({
     setMarkedSquares(new Set());
     setUserArrows([]);
   }, [fen]);
+
+  useEffect(() => {
+    if (!selected) return;
+    function onDoc(e: PointerEvent) {
+      if (!boardWrapRef.current?.contains(e.target as Node)) setSelected(null);
+    }
+    document.addEventListener('pointerdown', onDoc, { capture: true });
+    return () => document.removeEventListener('pointerdown', onDoc, { capture: true });
+  }, [selected]);
 
   useEffect(() => {
     if (!onHistoryIndexChange || historyIndex === undefined || historyLength === undefined) return;
@@ -118,20 +129,7 @@ export function Board({
       };
     }
     if (selected) {
-      styles[selected] = { ...(styles[selected] || {}), boxShadow: 'inset 0 0 0 3px rgba(74,144,226,0.8)' };
-      try {
-        const chess = chessFromFen(fen);
-        // chess.js v1 expects { square, verbose: true }
-        const legal = chess.moves({ square: selected as Square, verbose: true });
-        for (const m of legal) {
-          styles[m.to] = {
-            ...(styles[m.to] || {}),
-            background: `radial-gradient(circle, rgba(74,144,226,0.5) 22%, transparent 24%)`,
-          };
-        }
-      } catch {
-        // ignore
-      }
+      styles[selected] = { ...(styles[selected] || {}), boxShadow: 'inset 0 0 0 3px rgba(212,173,105,0.86)' };
     }
     if (preferences.hideDragGhost && dragOrigin) {
       styles[dragOrigin] = {
@@ -140,7 +138,7 @@ export function Board({
       };
     }
     return styles;
-  }, [highlights, markedSquares, selected, fen, preferences.hideDragGhost, dragOrigin]);
+  }, [highlights, markedSquares, selected, preferences.hideDragGhost, dragOrigin]);
 
   function attemptMove(from: string, to: string, promotion: string = 'q'): boolean {
     const ok = onMove({ from, to, promotion });
@@ -176,6 +174,30 @@ export function Board({
       return;
     }
     if (isAllowedPiece(piece)) setSelected(square);
+  }
+
+  function getPieceAt(square: string): { pieceType: string } | null {
+    try {
+      const p = chessFromFen(fen).get(square as Square);
+      if (!p) return null;
+      return { pieceType: `${p.color}${p.type.toUpperCase()}` };
+    } catch { return null; }
+  }
+
+  function handleLeftPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    leftPointerRef.current = { x: e.clientX, y: e.clientY };
+  }
+
+  function handleLeftPointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    const start = leftPointerRef.current;
+    leftPointerRef.current = null;
+    if (!start) return;
+    if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > 8) return;
+    const square = squareFromPoint(e.clientX, e.clientY, e.currentTarget, orientation);
+    if (!square) { setSelected(null); return; }
+    handleClickMove(square, getPieceAt(square));
   }
 
   function startResize(e: React.PointerEvent<HTMLButtonElement>) {
@@ -246,11 +268,12 @@ export function Board({
 
   return (
     <div
+      ref={boardWrapRef}
       className={'board-wrap' + (flashClass ? ' ' + flashClass : '')}
       style={{ width: `min(${size}px, 100%)` }}
-      onPointerDownCapture={handleRightPointerDown}
-      onPointerUpCapture={handleRightPointerUp}
-      onPointerCancel={() => { rightDragStartRef.current = null; }}
+      onPointerDownCapture={(e) => { handleRightPointerDown(e); handleLeftPointerDown(e); }}
+      onPointerUpCapture={(e) => { handleRightPointerUp(e); handleLeftPointerUp(e); }}
+      onPointerCancel={() => { rightDragStartRef.current = null; leftPointerRef.current = null; }}
       onContextMenuCapture={handleBoardContextMenu}
     >
       <Chessboard
@@ -285,13 +308,6 @@ export function Board({
           },
           onPieceDrag: ({ square }) => {
             setDragOrigin(square ?? null);
-          },
-          onPieceClick: ({ square, piece }) => {
-            if (!square) return;
-            handleClickMove(square, piece);
-          },
-          onSquareClick: ({ square, piece }) => {
-            handleClickMove(square, piece);
           },
         }}
       />

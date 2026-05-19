@@ -7,15 +7,16 @@ export interface Repertoire {
   id: string;
   name: string;
   color: Color;
-  // Where this repertoire begins. Usually the absolute starting position; could be a deeper
-  // anchor for variant-specific repertoires later.
+  // Where this preparation tree begins. Standard repertoires should normally
+  // use the absolute starting position so they can hold many opening branches.
   rootFen: NormFen;
-  // Curated opening this repertoire was created from (for display).
+  // Curated opening this repertoire was created from (for display/provenance only).
   openingKey: string | null;
   folderId?: string | null;
   // Internal storage name kept for old data: "siloed" means a separate repertoire that
-  // can intentionally contradict the main repertoire from the same position.
+  // can intentionally contradict another repertoire from the same position.
   projectKind?: 'standard' | 'siloed';
+  archived?: boolean;
   createdAt: string;
   updatedAt?: string;
 }
@@ -76,6 +77,12 @@ export interface FrontierPathStep {
 export interface FrontierCandidate {
   id: string;
   repertoireId: string;
+  color?: Color;
+  openingKey?: string | null;
+  openingName?: string | null;
+  scopeKey?: string;
+  rootFen?: NormFen;
+  startFen?: NormFen;
   parentFen: NormFen;
   childFen: NormFen;
   san: string;
@@ -92,12 +99,39 @@ export interface FrontierCandidate {
   updatedAt: string;
 }
 
+// A pre-built training line cached in IndexedDB so the next Train click can serve
+// it instantly. The build worker fills the cache up to a per-scope cap. Edges are
+// stored as IDs and rehydrated from the `edges` store on consumption, so the user
+// always sees fresh SRS state.
+export interface ReadyLine {
+  id: string;
+  repertoireId: string;
+  scopeKey: string;
+  fullPathEdgeIds: string[];
+  newEdgeIds: string[];
+  generationStartIndex: number;
+  frontierId?: string;
+  frontierFen?: NormFen;
+  // Cached for the queue UI so we don't have to rehydrate just to render a row.
+  startFen: NormFen;
+  endFen: NormFen;
+  qualityDropCp: number | null;
+  // Pre-rendered SAN preview (e.g. "1.e4 Nf6 2.e5 Nd5 ...") so the queue panel
+  // can show the line without hitting the edges store.
+  previewSan: string;
+  createdAt: string;
+}
+
 export function edgeId(repertoireId: string, parentFen: NormFen, childFen: NormFen): string {
   return `${repertoireId}::${parentFen}::${childFen}`;
 }
 
 export function frontierId(repertoireId: string, parentFen: NormFen, uci: string): string {
   return `${repertoireId}::${parentFen}::${uci}`;
+}
+
+export function readyLineId(repertoireId: string, scopeKey: string): string {
+  return `${repertoireId}::${scopeKey}::${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function newId(prefix = 'rep'): string {

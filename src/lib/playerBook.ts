@@ -132,6 +132,48 @@ export async function getPlayerBookMoves(playerKey: PlayerKey, fen: NormFen, col
   }));
 }
 
+export interface PlayerBookLookup {
+  bookFound: boolean;
+  playerName: string | null;
+  positionKey: string;
+  rawCandidates: PlayerBookPick[];
+}
+
+// Raw lookup used by the picker so it can stage filters and trace per-stage
+// rejections. Same source as `getPlayerBookMoves` but without the
+// `isCandidateTakeable` (W>L) filter and without the `compareCandidates` sort.
+// Candidates are returned in natural book-storage order so the trace shows
+// each move as the picker considered it.
+export async function getPlayerBookCandidatesRaw(
+  playerKey: PlayerKey,
+  fen: NormFen,
+  color: Color,
+  signal?: AbortSignal,
+): Promise<PlayerBookLookup> {
+  const positionKey = colorFenKey(color, fen);
+  const book = playerKey === 'self' ? await loadUserBook() : (await loadPlayerBooks(signal)).players.get(playerKey);
+  if (!book) return { bookFound: false, playerName: null, positionKey, rawCandidates: [] };
+  const candidates = book.byColorFen.get(positionKey);
+  const rawCandidates = (candidates ?? []).map(candidate => ({
+    ...candidate,
+    playerKey,
+    playerName: book.name,
+    net: candidate.wins - candidate.losses,
+    scoreRate: resultScoreRate(candidate),
+    sourceGameName: candidate.winExamples?.[0] ?? candidate.examples?.[0] ?? null,
+    sourceLine: candidate.sourceLine,
+  }));
+  return { bookFound: true, playerName: book.name, positionKey, rawCandidates };
+}
+
+export function isPlayerBookCandidateTakeable(candidate: Pick<PlayerBookPick, 'wins' | 'losses'>): boolean {
+  return candidate.wins > candidate.losses;
+}
+
+export function comparePlayerBookCandidates(a: PlayerBookPick, b: PlayerBookPick): number {
+  return compareCandidates(a, b);
+}
+
 export async function getPlayerBookStats(signal?: AbortSignal): Promise<PlayerBookStats[]> {
   const user = await loadUserBook();
   const builtIns = await loadPlayerBooks(signal);

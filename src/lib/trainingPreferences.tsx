@@ -5,12 +5,19 @@ import { getMeta, setMeta } from './storage';
 export interface TrainingPreferences {
   learnLineDepth: number;
   reviewSessionLength: number;
+  useLineAwareReview: boolean;
+  reviewLinePlaybackDelayMs: number;
 }
 
 export const DEFAULT_TRAINING_PREFERENCES: TrainingPreferences = {
   learnLineDepth: 5,
   reviewSessionLength: 10,
+  useLineAwareReview: true,
+  reviewLinePlaybackDelayMs: 80,
 };
+
+export const MIN_REVIEW_LINE_PLAYBACK_DELAY_MS = 40;
+export const MAX_REVIEW_LINE_PLAYBACK_DELAY_MS = 600;
 
 const META_TRAINING_PREFERENCES = 'training_preferences_v1';
 
@@ -60,6 +67,15 @@ function normalizeTrainingPreferences(saved?: Partial<TrainingPreferences>): Tra
   return {
     learnLineDepth: clampInteger(saved?.learnLineDepth, 3, 8, DEFAULT_TRAINING_PREFERENCES.learnLineDepth),
     reviewSessionLength: clampInteger(saved?.reviewSessionLength, 5, 30, DEFAULT_TRAINING_PREFERENCES.reviewSessionLength),
+    useLineAwareReview: typeof saved?.useLineAwareReview === 'boolean'
+      ? saved.useLineAwareReview
+      : DEFAULT_TRAINING_PREFERENCES.useLineAwareReview,
+    reviewLinePlaybackDelayMs: clampInteger(
+      saved?.reviewLinePlaybackDelayMs,
+      MIN_REVIEW_LINE_PLAYBACK_DELAY_MS,
+      MAX_REVIEW_LINE_PLAYBACK_DELAY_MS,
+      DEFAULT_TRAINING_PREFERENCES.reviewLinePlaybackDelayMs,
+    ),
   };
 }
 

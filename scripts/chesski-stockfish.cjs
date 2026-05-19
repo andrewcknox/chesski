@@ -39,22 +39,27 @@ function parseInfoLine(line) {
   const multipv = Number(line.match(/\bmultipv\s+(\d+)/)?.[1] ?? '1');
   const cpMatch = line.match(/\bscore\s+cp\s+(-?\d+)/);
   const mateMatch = line.match(/\bscore\s+mate\s+(-?\d+)/);
+  // UCI_ShowWDL output: `wdl <win> <draw> <loss>`, per-mille values summing to 1000,
+  // reported from the side-to-move's perspective. Stockfish 12 emits this when the
+  // `UCI_ShowWDL` option is enabled (set after `uciok` below).
+  const wdlMatch = line.match(/\bwdl\s+(\d+)\s+(\d+)\s+(\d+)/);
   const pvMatch = line.match(/\bpv\s+(.+)$/);
   if (!pvMatch) return null;
   const out = { multipv, moves: pvMatch[1].trim() };
   if (cpMatch) out.cp = Number(cpMatch[1]);
   if (mateMatch) out.mate = Number(mateMatch[1]);
+  if (wdlMatch) out.wdl = { win: Number(wdlMatch[1]), draw: Number(wdlMatch[2]), loss: Number(wdlMatch[3]) };
   return out;
 }
 
-function runStockfishEval(fen, multiPv = 5, depth = 12) {
+function runStockfishEval(fen, multiPv = 5, depth = 18) {
   if (!fs.existsSync(STOCKFISH_EXE)) {
     throw new Error(`Stockfish not found at ${STOCKFISH_EXE}`);
   }
 
   const fullFen = denormalizeFen(fen);
   const requestedMultiPv = Math.max(1, Math.min(Number(multiPv) || 1, 8));
-  const requestedDepth = Math.max(6, Math.min(Number(depth) || 12, 18));
+  const requestedDepth = Math.max(6, Math.min(Number(depth) || 18, 30));
 
   return new Promise((resolve, reject) => {
     const child = spawn(STOCKFISH_EXE, [], { cwd: path.dirname(STOCKFISH_EXE), windowsHide: true });
@@ -62,12 +67,18 @@ function runStockfishEval(fen, multiPv = 5, depth = 12) {
     let stdout = '';
     let settled = false;
 
+    // Per-eval cap is set vastly higher than depth-22 ever needs in practice (a
+    // typical depth-22 eval finishes in seconds; pathological middlegame positions
+    // might take a minute or two). The previous 45-second cap occasionally killed
+    // legitimate depth-22 calls on cold positions, causing the caller to record a
+    // null result that then poisoned downstream line generation. Slow generation
+    // is fine; corrupt generation is not.
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
       child.kill();
       reject(new Error('Stockfish timed out.'));
-    }, 20000);
+    }, 600000);
 
     function write(command) {
       child.stdin.write(`${command}\n`);
@@ -83,6 +94,12 @@ function runStockfishEval(fen, multiPv = 5, depth = 12) {
 
         if (line === 'uciok') {
           write(`setoption name MultiPV value ${requestedMultiPv}`);
+          // Enable WDL (Win/Draw/Loss) probability output. Stockfish 12+ supports
+          // this. Used by the line-generation quality gate to judge moves by
+          // expected-score drop rather than raw centipawn loss — which is more
+          // honest for positions where cp swings don't correspond to practical
+          // game-result swings (e.g. opening evals between roughly +0.7 and -0.3).
+          write('setoption name UCI_ShowWDL value true');
           write('isready');
           continue;
         }

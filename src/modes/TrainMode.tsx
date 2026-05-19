@@ -8,6 +8,7 @@ import {
   computeScopeKey,
   continueLearnLine,
   evaluateLineQuality,
+  frontierInScope,
   generateLearnLine,
   getPrepMoveWarning,
   getPrepOpponentBranches,
@@ -15,9 +16,11 @@ import {
   repairFrontierIndexAfterLearn,
   rebuildFrontierQueue,
   savePrepStopFrontier,
+  scopeFromOpening,
   evaluateMoveCpLoss,
   pvCpForWhite,
   TUNING,
+  type FrontierScope,
   type GeneratedLine,
   type GenerationTrace,
   type PrepMoveWarning,
@@ -167,6 +170,11 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
   // until they're actually studied.
   const [readyLines, setReadyLines] = useState<ReadyLine[]>([]);
   const [workerStatus, setWorkerStatus] = useState<'paused' | 'idle' | 'working' | 'error'>('paused');
+  // Counter bumped whenever a ready line is consumed (started by the user)
+  // so the build-worker effect re-fires and refills the cache. The worker's
+  // own `refreshReadyLines` after a successful build does NOT bump this —
+  // otherwise the effect would abort and restart on every build completion.
+  const [workerKick, setWorkerKick] = useState(0);
   const workerRef = useRef<{ abort: AbortController | null }>({ abort: null });
   const fallbackReviewRef = useRef(false);
   const handledPrepMapRequestRef = useRef<number | null>(null);
@@ -188,17 +196,22 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
     () => computeScopeKey(repertoire, selectedPrepOpening),
     [repertoire, selectedPrepOpening]
   );
-  // Open frontiers within the current scope, used by the Frontier Index debug view
+  // Full FrontierScope record (needs startFen, not just key) for the
+  // path-through-startFen check inside `frontierInScope`. The scoped views
+  // below MUST use `frontierInScope` rather than scopeKey equality so that
+  // ancestor frontiers (positions one or more plies BEFORE scope.startFen
+  // that happen to be stamped with this scope's key during DFS) are excluded.
+  // See docs/line-selection.md → "What 'in scope' means for a frontier".
+  const currentScope: FrontierScope | null = useMemo(
+    () => scopeFromOpening(repertoire, selectedPrepOpening),
+    [repertoire, selectedPrepOpening]
+  );
+  // Open frontiers within the current scope, used by the Frontier Index view
   // and failure reports. These are not generated ready lines.
   const scopedOpenFrontiers = useMemo(() => {
-    if (!currentScopeKey) return [];
-    return frontierQueue
-      .filter(f => f.status === 'open' && f.scopeKey === currentScopeKey);
-  }, [frontierQueue, currentScopeKey]);
-  const scopedFrontierQueue = useMemo(() => {
-    if (!currentScopeKey) return frontierQueue;
-    return frontierQueue.filter(f => f.scopeKey === currentScopeKey);
-  }, [frontierQueue, currentScopeKey]);
+    if (!currentScope) return [];
+    return frontierQueue.filter(f => f.status === 'open' && frontierInScope(f, currentScope));
+  }, [frontierQueue, currentScope]);
   const scopedFolder = useMemo(() => {
     if (!openingKey) return null;
     return listOpeningFoldersForRepertoire(repertoire, allEdges).find(folder => folder.key === openingKey) ?? null;
@@ -329,7 +342,7 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
           }
           const startFen = line.fullPath[line.generationStartIndex - 1]?.childFen ?? rep.rootFen;
           const endFen   = line.fullPath[line.fullPath.length - 1]?.childFen ?? startFen;
-          const quality = await evaluateLineQuality(startFen, endFen, rep.color, controller.signal, trace);
+          const quality = await evaluateLineQuality(line, rep.color, controller.signal, trace);
           assertLineRespectsScope(line, rep, scope ?? null, trace);
           const ready: ReadyLine = {
             id: readyLineId(rep.id, currentScopeKey),
@@ -347,7 +360,11 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
             createdAt: new Date().toISOString(),
           };
           await putReadyLine(ready);
-          await refreshReadyLines();
+          // Reload edges + frontiers (not just ready lines) so the visible
+          // frontier list reflects the answered frontier and any new
+          // candidates the build pipeline discovered. Cheap (IndexedDB
+          // reads only — no rediscovery).
+          await reload();
           setWorkerStatus('idle');
           trace(`Build complete: cached ready line ${ready.id}.`);
         }
@@ -364,7 +381,11 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
       }
     })();
     return () => controller.abort();
-  }, [isTraining, currentScopeKey, repertoire.id, refreshReadyLines]);
+    // `workerKick` is bumped whenever a ready line is consumed by the user;
+    // listing it in deps re-fires this effect so the worker resumes building
+    // immediately instead of waiting for the next phase change. `reload` is
+    // listed because the worker calls it after each successful build.
+  }, [isTraining, currentScopeKey, repertoire.id, refreshReadyLines, reload, workerKick]);
   useEffect(() => {
     (async () => setLoadingHistoryProgress(await getHistoryProgress()))();
   }, [refreshKey]);
@@ -518,6 +539,7 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
         // we don't want to keep trying it. The worker will refill an empty slot.
         await deleteReadyLine(ready.id);
         await refreshReadyLines();
+        setWorkerKick(k => k + 1);
         if (rehydrated) {
           if (!assertLineRespectsScope(rehydrated, repertoire, selectedPrepOpening ?? null, trace)) {
             trace(`Cache invalidated: ready line ${ready.id} does not match current scope=${currentScopeKey}.`);
@@ -1758,21 +1780,26 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
             readyLines={readyLines}
             workerStatus={workerStatus}
           />
+          {/*
+            Always-visible iterative frontier list. Pass `scopedOpenFrontiers`
+            so answered/blocked rows are excluded — answered frontiers visibly
+            disappear as the user completes lines, and newly discovered ones
+            appear as the build worker refills the queue. The verbose
+            all-statuses panel on the prep-map screen stays for deep inspection.
+          */}
+          <FrontierQueuePanel
+            frontiers={scopedOpenFrontiers}
+            readyLines={readyLines}
+            edges={scopedEdges}
+            rebuilding={rebuildingFrontiers}
+            copyStatus={frontierCopyStatus}
+            onRefresh={() => void refreshFrontierQueue()}
+            onCopy={() => void copyFrontierQueue()}
+          />
           <label className="muted small" style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
             <input type="checkbox" checked={showDebugInfo} onChange={e => setShowDebugInfo(e.target.checked)} />
-            Show debug info (frontier index + raw trace)
+            Show debug info (raw generation trace)
           </label>
-          {showDebugInfo && (
-            <FrontierQueuePanel
-              frontiers={scopedFrontierQueue}
-              readyLines={readyLines}
-              edges={scopedEdges}
-              rebuilding={rebuildingFrontiers}
-              copyStatus={frontierCopyStatus}
-              onRefresh={() => void refreshFrontierQueue()}
-              onCopy={() => void copyFrontierQueue()}
-            />
-          )}
           {showDebugInfo && genTrace.length > 0 && (
             <GenerationTracePanel
               trace={genTrace}
