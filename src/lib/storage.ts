@@ -1,7 +1,7 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import { Chess } from 'chess.js';
-import type { Color, Edge, FrontierCandidate, FrontierStatus, NormFen, PositionNode, ReadyLine, Repertoire } from '../types';
-import { edgeId, frontierId, newId } from '../types';
+import type { Color, Edge, FrontierCandidate, FrontierStatus, NormFen, PendingPartialLine, PositionNode, ReadyLine, Repertoire } from '../types';
+import { edgeId, frontierId, newId, pendingPartialLineId } from '../types';
 import { applyMove, computeOpeningFen, normalizeFen, STARTING_FEN_NORM } from './chess';
 import { freshSrsState } from './srs';
 import { CURATED_OPENINGS, findOpening, type ResolvedOpeningLine } from './openings';
@@ -47,13 +47,22 @@ interface ChessTrainerDB extends DBSchema {
       'by-rep-scope': [string, string];
     };
   };
+  pendingPartialLines: {
+    key: string;
+    value: PendingPartialLine;
+    indexes: {
+      'by-repertoire': string;
+      'by-rep-scope': [string, string];
+    };
+  };
 }
 
 const DB_NAME = 'chess-trainer';
 // Version 2: per-repertoire edge model. Bumping wipes old (incompatible) data.
 // Version 3: local frontier queue. Existing v2 data is preserved.
 // Version 4: pre-built training-line cache. Existing v3 data is preserved.
-const DB_VERSION = 4;
+// Version 5: pending-partial-line pointer (End-session resume). Existing v4 data is preserved.
+const DB_VERSION = 5;
 
 let _dbPromise: Promise<IDBPDatabase<ChessTrainerDB>> | null = null;
 
@@ -95,6 +104,11 @@ export function getDB(): Promise<IDBPDatabase<ChessTrainerDB>> {
         readyLines.createIndex('by-repertoire', 'repertoireId');
         readyLines.createIndex('by-rep-scope', ['repertoireId', 'scopeKey']);
       }
+      if (!db.objectStoreNames.contains('pendingPartialLines')) {
+        const pending = db.createObjectStore('pendingPartialLines', { keyPath: 'id' });
+        pending.createIndex('by-repertoire', 'repertoireId');
+        pending.createIndex('by-rep-scope', ['repertoireId', 'scopeKey']);
+      }
     },
   });
   return _dbPromise;
@@ -130,7 +144,7 @@ export async function updateRepertoire(id: string, patch: Partial<Pick<Repertoir
 
 export async function deleteRepertoire(id: string): Promise<void> {
   const db = await getDB();
-  const tx = db.transaction(['repertoires', 'edges', 'frontiers', 'readyLines'], 'readwrite');
+  const tx = db.transaction(['repertoires', 'edges', 'frontiers', 'readyLines', 'pendingPartialLines'], 'readwrite');
   await tx.objectStore('repertoires').delete(id);
   // Delete all edges scoped to this repertoire.
   const edgeStore = tx.objectStore('edges');
@@ -153,6 +167,13 @@ export async function deleteRepertoire(id: string): Promise<void> {
   while (readyCur) {
     await readyCur.delete();
     readyCur = await readyCur.continue();
+  }
+  const pendingStore = tx.objectStore('pendingPartialLines');
+  const pendingIdx = pendingStore.index('by-repertoire');
+  let pendingCur = await pendingIdx.openCursor(IDBKeyRange.only(id));
+  while (pendingCur) {
+    await pendingCur.delete();
+    pendingCur = await pendingCur.continue();
   }
   await tx.done;
   // Note: shared PositionNodes are not garbage-collected here — they're cheap and may be
@@ -1007,6 +1028,32 @@ export async function clearReadyLines(repertoireId: string, scopeKey?: string): 
   for (const line of lines) await tx.store.delete(line.id);
   await tx.done;
   return lines.length;
+}
+
+// ---------- Pending partial lines ----------
+
+// One pointer per (repertoireId, scopeKey): the segment the user was midway
+// through when they hit "End session" in a line-aware review. Consumed by the
+// next line-aware review entry (deleted on consume). Ignored by flat review.
+export async function getPendingPartialLine(repertoireId: string, scopeKey: string): Promise<PendingPartialLine | null> {
+  const db = await getDB();
+  const row = await db.get('pendingPartialLines', pendingPartialLineId(repertoireId, scopeKey));
+  return row ?? null;
+}
+
+export async function putPendingPartialLine(line: PendingPartialLine): Promise<void> {
+  const db = await getDB();
+  await db.put('pendingPartialLines', line);
+}
+
+export async function deletePendingPartialLine(repertoireId: string, scopeKey: string): Promise<void> {
+  const db = await getDB();
+  await db.delete('pendingPartialLines', pendingPartialLineId(repertoireId, scopeKey));
+}
+
+export async function getPendingPartialLinesForRepertoire(repertoireId: string): Promise<PendingPartialLine[]> {
+  const db = await getDB();
+  return db.getAllFromIndex('pendingPartialLines', 'by-repertoire', repertoireId);
 }
 
 // ---------- Meta ----------

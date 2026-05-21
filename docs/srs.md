@@ -64,9 +64,9 @@ So a brand-new card that you pass on first review schedules itself for *tomorrow
 
 The geometric factor *is* the `ease`. Ease stays at 2.5 unless you fail the card.
 
-### `gradeFail(edge)` — failing the first attempt
+### `gradeFail(edge, options?)` — failing the first attempt
 
-Used when you played a *wrong* move (first wrong attempt at a prompt — subsequent identical wrongs don't re-grade). See "first-try-only grading" below.
+Used when you played a *wrong* move (the first call per card per session — see "Multi-grade within one session" below for what happens on later wrongs).
 
 The update:
 
@@ -75,15 +75,32 @@ ease                      ← max(1.3, ease - 0.2)
 reps                      ← 0
 lapses                    ← lapses + 1
 intervalDays              ← 0
-dueAt                     ← end of today (23:59:59 local)
+dueAt                     ← now + relearnMinutes  (default 5; Anki-style relearning)
 lastReviewedAt            ← now
 ```
+
+`options.relearnMinutes` defaults to `DEFAULT_RELEARN_MINUTES` (5). The setting is user-tunable from Settings → SRS system settings → Relearn interval, range 1–60 minutes. The chosen value is captured into the review phase at session start (`reviewSessionRelearnMinutes`) so mid-session settings changes don't shift dueAt unexpectedly.
 
 So failing:
 
 - **Drops ease by 0.2**, floored at 1.3 (the SM-2 minimum). Once a card's ease is 1.3, every future interval grows slowly — `round(intervalDays × 1.3)`. This is intentional: cards you keep failing should not stay on a long schedule.
 - **Resets reps to 0**, so the next pass goes back to the 1-day step.
-- **Schedules the card for end of today** — `23:59:59` on the user's local date. In practice this means the card is NOT due again later today (your session ends, midnight rolls over, then it's due again first thing tomorrow). The next-day delivery is the safety net for missed prompts.
+- **Schedules the card for now + relearnMinutes.** Default 5 minutes. The card stays "due" for the rest of the day — a later same-day review session will pick it up again. Within the same session, the *delivery layer* re-prompts you via the segment-repeat loop (see [review-flow.md](review-flow.md)); SRS itself just sets the dueAt and gets out of the way.
+
+### `gradeFail` with `skipCompound: true` — refresh dueAt only
+
+When a card has already been graded fail earlier in this session (tracked by `failedPromptIdsThisSession` on the review phase), subsequent fails on the same card should NOT compound the ease drop or bump lapses again. Pass `options.skipCompound = true`:
+
+```
+ease                      ← unchanged
+reps                      ← unchanged
+lapses                    ← unchanged
+intervalDays              ← unchanged
+dueAt                     ← now + relearnMinutes  (refreshed from this attempt)
+lastReviewedAt            ← now
+```
+
+The callers (`attemptSegmentedReviewMove`, `attemptReviewMove`, `revealCurrentHint`, `handleSkipSegmentedReview`) check `failedPromptIdsThisSession.includes(edge.id)` before deciding whether to pass `skipCompound`. See "Multi-grade within one session" below.
 
 ### `gradeLearnPass(edge)` — learning a brand-new card
 
@@ -117,20 +134,33 @@ lastReviewedAt = null
 
 Functionally identical to `gradeLearnPass(edge)` if `reps` was already 0 — but `freshSrsState` is for edges that don't yet exist.
 
-## First-try-only grading
+## Multi-grade within one session
 
-Both review delivery modes (segmented and flat-legacy) grade each prompt **once** per session:
+A prompt can be graded multiple times in one session — that's the design now. The new "segment-repeat until clean pass" delivery (see [review-flow.md](review-flow.md)) means the user re-encounters the same prompt across multiple passes through the same segment, and we need rules for what each subsequent grade does.
 
-- **`gradePass`** fires only if `wrongCount === 0` (no wrong attempts on this prompt yet) AND the prompt isn't already in the session's `gradedPromptEdgeIds` set.
-- **`gradeFail`** fires on the *first* wrong attempt at a prompt. Subsequent wrongs at the same prompt — even different wrong moves — do NOT re-grade. Subsequent *identical* wrong moves bump `sameWrongCount`, which can trigger an override flow if it reaches `OVERRIDE_AFTER_SAME_WRONG_COUNT`.
+Two session-scoped sets on the review phase drive the logic:
 
-`gradedPromptEdgeIds` is session-scoped. Closing and reopening the session resets it.
+- **`gradedPromptEdgeIds`** — edges where `gradePass` has fired this session. Used to suppress re-grading on subsequent correct plays. Cleared from the set when an edge is later failed (a passed card that's later failed is no longer "passed").
+- **`failedPromptIdsThisSession`** — edges where `gradeFail` has fired with full compounding this session. Subsequent fails on the same edge in the same session refresh dueAt via `skipCompound` (no further ease drop, no further lapses bump). Also used to *block* `gradePass` on right-after-wrong runs: once a card has been failed this session, no later right move can promote it.
+
+The rules, applied per attempt at a prompt:
+
+- **Right on first try, never failed this session, never passed this session** → `gradePass` fires. dueAt jumps to 1/3/8/… days. Add to `gradedPromptEdgeIds`.
+- **Right, but already in `failedPromptIdsThisSession`** → no `gradePass`. The card stays at +relearnMinutes (the original fail's schedule). This is the "right after wrong" rule: a card you missed during this session is not promoted, even if you eventually get it right.
+- **Right, but already in `gradedPromptEdgeIds`** (already passed this session, never failed) → no re-grade. Card stays at the already-pushed-forward dueAt.
+- **Wrong, never failed this session** → full `gradeFail`. ease −0.2, lapses+1, reps=0, dueAt = +relearnMinutes. Add to `failedPromptIdsThisSession`. If the card was previously in `gradedPromptEdgeIds` this session (right→then→wrong), remove it from that set — the fail supersedes the pass.
+- **Wrong, already failed this session** → `gradeFail` with `skipCompound: true`. dueAt refreshes to +relearnMinutes from this attempt. ease and lapses do NOT compound.
+
+The override flow (`OVERRIDE_AFTER_SAME_WRONG_COUNT` identical wrong moves in a row) is unchanged and runs independent of these rules.
 
 Practical implications:
 
-- If you make a wrong move and then play the correct move, the card is graded as a *fail*, not a pass. `dueAt` goes to `endOfTodayISO`, and the card is due again tomorrow.
-- If you use a hint (or skip a prompt), the system grades it as a fail. Same effect.
-- If you fail a prompt and then keep playing the same wrong move three times, an override prompt appears that lets you accept the wrong move as a new repertoire choice. That flow is separate from SRS — the override doesn't grade further.
+- If you fail a card then later get it right in the same session, it ends the session in fail state (ease dropped once, dueAt = +relearnMinutes). It will reappear in a later same-day session via the relearn interval.
+- If you keep playing the same wrong move three times, the override prompt appears (separate from SRS — it lets you accept the wrong move as a new repertoire choice).
+- Hints and skips count as fails — they go through the same rules above. A single hint click on a pass is enough to mark that pass unclean (so the segment will restart) and to schedule the card at +relearnMinutes. The hint UI tints the from-square of the stored move only — not the to-square, and not a move arrow — so the user still has to recall where the piece goes.
+- A pass→fail→right within one session ends in fail state (ease dropped, dueAt = +relearnMinutes). The pass-1 schedule is reversed by the pass-2 gradeFail; pass-3 right cannot un-reverse it.
+
+The same per-session guard is also applied in the legacy flat-queue review (`attemptReviewMove`), so the flat path can't compound ease/lapses on the rare cases where a card appears more than once in a session.
 
 ## How cards enter the queue
 
@@ -161,11 +191,11 @@ You see a new prompt — `3.Bc4` after `1.e4 e5 2.Nf3 Nc6`. Initial state: `ease
 
 ### A card you keep getting wrong
 
-You hit `3.Bc4`. `ease=2.5, reps=2, intervalDays=8, lapses=0`. You play `3.Bb5` (wrong). `gradeFail` fires: `ease=2.3, reps=0, lapses=1, intervalDays=0, dueAt=endOfTodayISO`. Next morning it's due. You fail again: `ease=2.1, lapses=2`. After enough failures, `ease=1.3` (floor). Now every pass only multiplies by 1.3: 1 → 3 → 4 → 5 → 7 days. The card stays close-by until you genuinely lock it in.
+You hit `3.Bc4`. `ease=2.5, reps=2, intervalDays=8, lapses=0`. You play `3.Bb5` (wrong). `gradeFail` fires: `ease=2.3, reps=0, lapses=1, intervalDays=0, dueAt = now + 5 min`. The within-session segment loop re-prompts you until you get one clean pass through the segment; if you keep missing this card on later passes, dueAt refreshes (skipCompound) but ease/lapses don't move again. You complete the session; ~5 minutes later, a new session can pick it up — `gradeFail` fires only if you miss it AGAIN (a fresh session is a fresh failedPromptIdsThisSession set), in which case `ease=2.1, lapses=2`. After enough failed sessions, `ease=1.3` (floor). Now every pass only multiplies by 1.3: 1 → 3 → 4 → 5 → 7 days. The card stays close-by until you genuinely lock it in.
 
 ### A card you've been crushing for months
 
-`ease=2.5, reps=12, intervalDays=2300` (over 6 years). `dueAt` is in the distant future. The card doesn't appear in any review queue. If you ever fail it, the schedule collapses back to `dueAt=endOfTodayISO, reps=0, ease=2.3`. SM-2 doesn't have a separate "leech" concept — a card that's failed twice from a long interval will just rebuild slowly.
+`ease=2.5, reps=12, intervalDays=2300` (over 6 years). `dueAt` is in the distant future. The card doesn't appear in any review queue. If you ever fail it, the schedule collapses back to `dueAt = now + 5 min, reps=0, ease=2.3`. SM-2 doesn't have a separate "leech" concept built into the SRS layer — a card that's failed twice from a long interval will just rebuild slowly. (Leech tagging for cards failed across N consecutive sessions is on the wishlist; see [wishlist.md](wishlist.md).)
 
 ## Debugging — "why is this card behaving this way?"
 
@@ -173,14 +203,14 @@ You hit `3.Bc4`. `ease=2.5, reps=2, intervalDays=8, lapses=0`. You play `3.Bb5` 
 2. **Check `dueAt`.** If it's in the past, the card is correctly due. If it's in the future, it shouldn't be appearing — if it is, look at the review queue building.
 3. **Check `reps` vs `lapses`.** A card you've been struggling with will have high `lapses` and a `reps` that resets to 0 each time. If reps stays at 0 forever, you've failed it on every attempt.
 4. **Check `ease`.** If it's 1.3, the SM-2 floor, intervals are growing slowly. This is correct for a card you've failed a lot.
-5. **Check whether grade functions are firing.** In segmented review, a wrong-then-right sequence does NOT call `gradePass` — the card keeps its old `dueAt`. The user sees a "correct" flash but the SRS state hasn't moved. This is the most common source of "I got it right but it's still showing up tomorrow."
-6. **Check the daily roll-over.** A failed card has `dueAt = endOfTodayISO`, which means *very end of today*. Late in the day, that's seconds away — when midnight passes, the card is due again. In practice this almost always means "due next session."
+5. **Check whether grade functions are firing.** A wrong-then-right sequence within one session does NOT call `gradePass` — the card stays in fail state with `dueAt = +relearnMinutes`. The user sees a "correct" flash but the SRS state's dueAt is minutes from now, not days. This is the most common source of "I got it right but it's still coming back."
+6. **Check the relearn interval.** A failed card has `dueAt = now + relearnMinutes` (default 5). It'll reappear in any later same-day review session. The within-session segment-repeat loop also re-prompts you without touching SRS (delivery-layer behavior — see [review-flow.md](review-flow.md)).
 
 ## Edge cases and gotchas
 
 - **Ease floor:** `ease` is floored at 1.3 — the SM-2 minimum. Below that, intervals barely grow. Above the floor it's whatever you've been graded to.
 - **No ease ceiling:** A card with `ease=2.5` that you keep passing will eventually have `intervalDays` in the thousands. There's no cap. If you set a long enough horizon and pass consistently, cards effectively disappear from the queue.
-- **`gradeLearnPass` is the only grade that keeps dueAt at *now*.** All other grades push it forward (one to many days for pass, end-of-today for fail).
+- **`gradeLearnPass` is the only grade that keeps dueAt at *now*.** All other grades push it forward (one to many days for pass, +relearnMinutes for fail).
 - **There's no neutral / "easy" / "hard" grade.** SM-2 in SuperMemo proper has 5 grades (0-5); Chesski collapses them to pass/fail with a separate learn-pass for the initial walkthrough. If you want finer control, you'd need to extend `srs.ts` and the callers in `TrainMode.tsx`.
 - **Scaffold edges (opponent moves) carry SRS state too.** It's just never consulted. This is wasted bytes in IndexedDB but keeps the schema uniform — every edge has the same shape regardless of mover.
 
@@ -196,8 +226,9 @@ You hit `3.Bc4`. `ease=2.5, reps=2, intervalDays=8, lapses=0`. You play `3.Bb5` 
 ## DO NOT
 
 - **Do not grade context moves.** During segmented review, auto-played opponent (and user) moves between prompts are presentation only. Only the prompt edge gets graded. (Repeated from review-flow.md for clarity.)
-- **Do not call `gradePass` on a wrong-then-right run.** First-try-only is the spec. If you want a "you eventually got it right" credit, talk to the user first — it's a real product decision, not a refactor.
-- **Do not change `gradeFail`'s dueAt to "in 1 hour" or "in 5 minutes."** End-of-today is the safety net. Mid-session re-practice is the delivery layer's job (see review-flow.md), not the SRS layer's.
+- **Do not call `gradePass` on a wrong-then-right run.** Right-after-wrong stays in fail state — see "Multi-grade within one session" above. If you want a "you eventually got it right" credit, talk to the user first — it's a real product decision.
+- **Do not compound ease/lapses across same-session fails of the same card.** Subsequent fails on a card already in `failedPromptIdsThisSession` must pass `skipCompound: true` to `gradeFail`. Without that guard, one bad session can tank a card's ease to the 1.3 floor.
+- **Do not bring back `endOfTodayISO` scheduling for fail.** The +relearnMinutes scheduling is intentional — failed cards reappear in later same-day sessions (Anki-style relearning). The within-session segment-repeat loop handles same-pass re-prompting.
 - **Do not raise the ease floor above 1.3.** It's the SM-2 spec value. Above 1.3, hard cards grow intervals too fast and never settle.
 - **Do not introduce a new `grade…` function** without first asking whether the existing four suffice. They cover every situation Chesski has needed so far. New grades fragment the persistence story and confuse the call sites.
 - **Do not store SRS state anywhere other than the edge.** No separate "card history" store. The edge IS the card.

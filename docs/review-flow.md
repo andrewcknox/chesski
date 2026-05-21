@@ -15,11 +15,12 @@ Review has two completely separate layers:
 | **SRS state** | Per-edge fields: `ease`, `intervalDays`, `reps`, `lapses`, `dueAt`, `lastReviewedAt`. SM-2 grading mutates them. | `src/types.ts` (Edge), `src/lib/srs.ts` (`isDue` / `gradePass` / `gradeFail` / `gradeLearnPass`) | A card is graded — never during context auto-play |
 | **Review delivery** | How due cards are presented: flat one-card-at-a-time, OR line-by-line with auto-played context. | `src/modes/TrainMode.tsx` (the `phase.kind === 'review'` render branches), `src/lib/reviewPlan.ts` (segment planner) | A session starts and a plan is built |
 
-The Chessable rework changed **delivery only**. SRS state, the grading
-functions, due-date logic, and the IndexedDB edge schema are untouched. If a
-future change feels like it's about "review", first ask whether it belongs in
-the SRS layer or the delivery layer — the answer dictates which files you
-touch.
+The Chessable rework changed delivery; the 2026-05-21 follow-up tweaked
+`gradeFail` to schedule `dueAt = now + relearnMinutes` (Anki-style relearning,
+default 5 min) instead of end-of-today, and added per-session multi-grade
+guards. The IndexedDB edge schema is untouched. If a future change feels
+like it's about "review", first ask whether it belongs in the SRS layer or
+the delivery layer — the answer dictates which files you touch.
 
 ## Two delivery modes share one Phase kind
 
@@ -136,12 +137,20 @@ opponent moves — same cadence, same feel. Don't fork it without a reason.
 
 ### Where SRS grading fires (and where it must NOT)
 
-Only `attemptSegmentedReviewMove` grades. It fires:
+Only `attemptSegmentedReviewMove`, `revealCurrentHint`, and
+`handleSkipSegmentedReview` grade. They all go through
+`persistSegmentedReviewGrade(edge, grade, options?)`. See the rules in
+[srs.md](srs.md) "Multi-grade within one session"; the high-level summary:
 
-- `gradePass(edge)` on correct move **only if `wrongCount === 0`** (first
-  attempt). Same as the legacy `attemptReviewMove`.
-- `gradeFail(edge)` on wrong move **only if `newSameCount === 1`** (first
-  wrong of a run, not subsequent identical retries). Same as legacy.
+- `gradePass(edge)` on correct move **only if** the edge is not in
+  `failedPromptIdsThisSession` (right-after-wrong stays as fail) AND not
+  already in `gradedPromptEdgeIds` AND `wrongCount === 0` for the current
+  prompt attempt.
+- `gradeFail(edge, { relearnMinutes, skipCompound })` on wrong move. First
+  fail of a card per session → full compounding. Subsequent fails on the
+  same card same session → `skipCompound: true` (refresh `dueAt` only, no
+  further ease drop or lapses bump).
+- Hint and skip both grade as fail with the same compounding guard.
 
 Critically: `advanceSegmentedReviewContext` (the auto-play step) **does not
 grade anything**. Context moves are presentation only. The auto-play timer
@@ -163,35 +172,49 @@ fetch fails. Same defensive pattern as `completeTestLine`.
 
 ### When does a segment end?
 
-`advanceReviewSegmentAfterFlash` (fires after `good-flash`) and
-`advanceSegmentedReviewContext` (fires from auto-play) both check
+`advanceReviewSegmentAfterFlash` (after `good-flash`) and
+`advanceSegmentedReviewContext` (auto-play) both check
 `nextPly >= seg.path.length`. When true, `completeOrRepeatReviewSegment` is
-called — which **always** calls `jumpToNextSegment` and advances `segmentIdx`.
-When all segments are done, the phase transitions to `{ kind: 'done', mode }`
-— same terminal state the legacy review path uses.
+called, which **branches on `wrongPromptIdsThisPass`**:
 
-**No repeat-until-clean.** An earlier version of `completeOrRepeatReviewSegment`
-loop-backed to `restartReviewSegment(p)` when `segmentRunUnclean === true`,
-forcing the user to redo the whole segment until a mistake-free pass. That
-behavior was undocumented and trapped users in "same line over and over"
-loops; removed 2026-05. Missed prompts are now handled exclusively by SRS:
-`gradeFail` sets `dueAt = endOfTodayISO` so the failed card is due again
-tomorrow morning. `segmentRunUnclean` is still written by the wrong/hint/skip
-handlers but is no longer read for control flow (kept in case a future feature
-wants to surface "you had X misses on this pass" UI). `restartReviewSegment`
-is gone.
+- If `wrongPromptIdsThisPass` is empty → the pass was clean. Call
+  `jumpToNextSegment` to advance `segmentIdx`. When all segments are done,
+  the phase transitions to `{ kind: 'done', mode }`.
+- If `wrongPromptIdsThisPass` is non-empty → the pass had a wrong move on
+  at least one prompt. Call `restartReviewSegment(p)` to reset
+  `contextPlyIdx = 0`, clear `wrongPromptIdsThisPass`, increment
+  `segmentAttemptNumber`. Session-scoped state
+  (`failedPromptIdsThisSession`, `gradedPromptEdgeIds`) is preserved across
+  the restart.
+
+**One clean pass per segment.** Every originally-due card in the segment is
+prompted every pass; the user must complete one full pass through the
+segment with no wrong moves on any prompt before advancing. There is no
+hard cap on the number of passes — the user gets it eventually or accepts
+their wrong move via the existing override flow.
+
+**History note (2026-05-21).** An earlier (May 2026) revision removed the
+segment-repeat loop and relied on `gradeFail` setting
+`dueAt = endOfTodayISO` to surface missed prompts the next day. That dropped
+the within-session drilling behavior. The current implementation restores
+the segment loop with clean-pass semantics and switches `gradeFail` to
+`dueAt = now + relearnMinutes` (Anki-style relearning) so missed cards also
+reappear in later same-day sessions.
 
 ### Wrong-answer behavior
 
-Identical to legacy: bad-flash, return to await on the **same prompt**.
-`gradeFail` fires on first wrong only. After
+bad-flash, return to await on the **same prompt**. `gradeFail` fires per the
+session/pass rules described under "Where SRS grading fires" above — first
+fail of a card per session is a full grade, subsequent fails use
+`skipCompound: true` to refresh dueAt only. After
 `OVERRIDE_AFTER_SAME_WRONG_COUNT` (3) repeats of the same wrong move,
-`triggerReviewOverride` is called with the prompt edge — same override
-flow Learn uses.
+`triggerReviewOverride` is called with the prompt edge — same override flow
+Learn uses.
 
-The card stays in its segment. It does not get re-queued to the end of the
-session. The next-day session will see it again via SRS (gradeFail sets
-`dueAt: endOfTodayISO`, which is "due now" in tomorrow's session).
+The card stays in its segment. The pass it was missed on is marked unclean
+(`wrongPromptIdsThisPass` non-empty) so the segment will restart after the
+final ply. The +relearnMinutes scheduling means a later same-day review
+session will see the card again via SRS too.
 
 ## Settings toggle — `useLineAwareReview`
 
@@ -247,10 +270,11 @@ its BFS only walks `scopedEdges`. The flat queue and the plan can't diverge.
 | --- | --- | --- |
 | `OPP_AUTOPLAY_DELAY_MS` | 80ms | Time between auto-played context moves. Same as walkthrough opponent moves. Raise if feedback is "too fast". |
 | `BAD_FLASH_MS` | 110ms | Good-flash / bad-flash duration before advancing or returning to await. |
-| `HINT_AFTER_WRONG_COUNT` | 1 | Show arrow on the prompt after this many wrongs. |
+| `HINT_AFTER_WRONG_COUNT` | 1 | Tint the from-square of the prompted move after this many wrongs (Hint button also forces this). Hint click counts as a wrong: it grades fail, marks the pass unclean, and tints the from-square. No move arrow — only the source square is shown so the user still has to remember the destination. |
 | `OVERRIDE_AFTER_SAME_WRONG_COUNT` | 3 | Trigger override prompt after this many repeats of the same wrong move. |
 | `trainingPreferences.reviewSessionLength` | user setting (5-30, default 10) | Caps the flat queue before the planner sees it. Segments can therefore prompt at most this many times in one session. |
 | `trainingPreferences.useLineAwareReview` | bool (default true) | Master switch for the segmented delivery. |
+| `trainingPreferences.relearnMinutes` | user setting (1-60, default 5) | How many minutes from `now` `gradeFail` schedules `dueAt`. Captured into `phase.reviewSessionRelearnMinutes` at session start so mid-session settings changes don't shift dueAt. Settings UI: SRS system settings → Relearn interval. |
 
 ## Tests — `src/lib/reviewPlan.test.ts`
 
@@ -304,6 +328,20 @@ add a test that exercises it.
 - **Do not bypass `getEdge` when grading.** Plans hold edge snapshots from
   session start. Always fetch the latest before grading — interim training
   in the same session may have updated SRS state.
+- **Do not let a segment advance with non-empty `wrongPromptIdsThisPass`.**
+  `completeOrRepeatReviewSegment` must restart the segment if any prompt was
+  missed on the current pass. Bypassing this check brings back the bug
+  where segments advanced after a single dirty pass and the user never got
+  to drill the line clean.
+- **Do not bring back `endOfTodayISO` scheduling for `gradeFail`.** Use
+  `now + relearnMinutes`. The within-session re-practice is handled by the
+  segment loop; the +relearnMinutes scheduling is for cross-session same-day
+  reappearance (Anki-style relearning). Reverting either drops one of the
+  two recovery mechanisms.
+- **Do not compound ease/lapses across same-session fails of the same
+  card.** The wrong/hint/skip handlers check `failedPromptIdsThisSession`
+  before deciding whether to pass `skipCompound: true` to gradeFail. See
+  [srs.md](srs.md) "Multi-grade within one session".
 - **Do not "improve" the planner by adding LCA / deepest-shared-branch
   ordering without a spec change.** That was deliberately deferred to a v2.
   See `docs/wishlist.md`.
@@ -333,8 +371,10 @@ add a test that exercises it.
 - **`src/modes/SettingsMode.tsx`** — checkbox UI.
 - **`src/lib/review.ts`** — unchanged. `buildReviewQueue` is the planner's
   upstream input. `edgesForOpeningFolder` is reused for scope filtering.
-- **`src/lib/srs.ts`** — unchanged. SM-2 logic. Don't touch this when
-  changing delivery.
+- **`src/lib/srs.ts`** — SM-2 logic. Changed 2026-05-21 to support
+  per-session relearn (`gradeFail` takes `options.relearnMinutes` /
+  `options.skipCompound`). Otherwise treat as a delivery-layer dependency:
+  don't add review-specific logic here.
 - **`docs/wishlist.md`** — the original spec and the deferred v2 ideas.
 - **`docs/line-selection.md`** — Learn-side companion doc; the "three
   algorithms" distinction there is parallel to this doc's "two layers".

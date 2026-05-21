@@ -27,8 +27,8 @@ import {
   type PrepOpponentBranch,
 } from '../lib/autosuggest';
 import { fetchCloudEval } from '../lib/lichess';
-import { addMovesToRepertoire, CURATED_OPENINGS, countReadyLines, deleteReadyLine, getEdge, getEdgesByMover, getEdgesForRepertoire, getEdgesFromParent, getFrontiersForRepertoire, getReadyLines, getReadyLinesForRepertoire, markCuratedOpeningScaffolds, playMoveInRepertoire, putEdge, putReadyLine, swapMoveInRepertoire } from '../lib/storage';
-import type { ReadyLine } from '../types';
+import { addMovesToRepertoire, CURATED_OPENINGS, countReadyLines, deletePendingPartialLine, deleteReadyLine, getEdge, getEdgeById, getEdgesByMover, getEdgesForRepertoire, getEdgesFromParent, getFrontiersForRepertoire, getPendingPartialLine, getReadyLines, getReadyLinesForRepertoire, markCuratedOpeningScaffolds, playMoveInRepertoire, putEdge, putPendingPartialLine, putReadyLine, swapMoveInRepertoire } from '../lib/storage';
+import type { PendingPartialLine, ReadyLine } from '../types';
 import { readyLineId } from '../types';
 import { listOpeningFoldersForRepertoire } from '../lib/openingFolders';
 import { gradeFail, gradeLearnPass, gradePass, isDue } from '../lib/srs';
@@ -98,9 +98,12 @@ type Phase =
       segmentIdx?: number;       // index into plan.segments
       contextPlyIdx?: number;    // index into plan.segments[segmentIdx].path
       promptIdxInSegment?: number; // index into segments[segmentIdx].prompts; === prompts.length when no more prompts in this segment
-      gradedPromptEdgeIds?: string[]; // session-wide segmented review SRS grades, one grade per due card
-      segmentRunUnclean?: boolean; // current segment pass had a miss, hint, skip, or other help
-      segmentAttemptNumber?: number;
+      gradedPromptEdgeIds?: string[]; // edges where gradePass has run this session (suppresses re-pass; cleared when re-graded fail)
+      failedPromptIdsThisSession?: string[]; // edges where gradeFail has fired with full ease/lapse compounding this session. Subsequent fails on the same edge in the same session refresh dueAt only (skipCompound). Also used to block gradePass on right-after-wrong runs. See docs/srs.md "Multi-grade within one session".
+      wrongPromptIdsThisPass?: string[]; // edges that had a wrong move on the current pass through this segment. Cleared on segment restart and on segment advance. If empty at end-of-pass → segment is clean → advance. See docs/review-flow.md "When does a segment end?".
+      segmentRunUnclean?: boolean; // legacy mirror of wrongPromptIdsThisPass non-empty; kept for any external readers but the loop control reads wrongPromptIdsThisPass directly.
+      segmentAttemptNumber?: number; // 1 on first pass through a segment; incremented when the segment restarts.
+      reviewSessionRelearnMinutes?: number; // captured at session start so settings changes mid-session don't shift dueAt unexpectedly.
     }
   | { kind: 'done'; mode: SessionMode };
 
@@ -440,6 +443,51 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
   const previousPhaseRef = useRef<Phase | null>(null);
   phaseRef.current = phase;
 
+  // End-session rollback support. Holds pre-grade `Edge` snapshots keyed by
+  // edge id; the first SRS mutation in a session snapshots, subsequent ones
+  // are no-ops. Cleared on session entry and on clean session completion;
+  // restored to IDB when the user hits "End session". See plan for cases A/B/C.
+  const sessionSrsSnapshotsRef = useRef<Map<string, Edge>>(new Map());
+
+  // Metadata of the ready line that was just consumed (so an "End session"
+  // during Learn can re-put the exact same row and re-offer the line next time).
+  // Null when the current line was generated live (no prior cache entry).
+  const lastConsumedReadyLineRef = useRef<{
+    id: string;
+    qualityDropCp: number | null;
+    previewSan: string;
+    frontierId?: string;
+    frontierFen?: NormFen;
+    createdAt: string;
+  } | null>(null);
+
+  async function snapshotEdgeOnce(edge: Edge): Promise<void> {
+    if (!sessionSrsSnapshotsRef.current.has(edge.id)) {
+      sessionSrsSnapshotsRef.current.set(edge.id, { ...edge });
+    }
+  }
+
+  function clearSessionSrsSnapshots(): void {
+    sessionSrsSnapshotsRef.current = new Map();
+  }
+
+  async function rollbackSessionSrsForEdges(ids: Set<string>): Promise<void> {
+    const snaps = sessionSrsSnapshotsRef.current;
+    for (const [id, original] of snaps) {
+      if (!ids.has(id)) continue;
+      await putEdge(original);
+      snaps.delete(id);
+    }
+  }
+
+  async function rollbackAllSessionSrs(): Promise<void> {
+    const snaps = sessionSrsSnapshotsRef.current;
+    for (const original of snaps.values()) {
+      await putEdge(original);
+    }
+    sessionSrsSnapshotsRef.current = new Map();
+  }
+
   useEffect(() => {
     const prev = previousPhaseRef.current;
     previousPhaseRef.current = phase;
@@ -519,6 +567,8 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
       setGenTrace(prev => [...prev, line]);
     };
     trace(`Session requested: mode=${mode}, repertoire="${repertoire.name}", color=${repertoire.color}, root=${repertoire.rootFen}, opening=${selectedPrepOpening?.name ?? 'current root'}`);
+    clearSessionSrsSnapshots();
+    lastConsumedReadyLineRef.current = null;
     const allReadyAtStart = await getReadyLinesForRepertoire(repertoire.id);
     trace(`Queue key sanity: currentScopeKey=${currentScopeKey ?? '(null)'}, readyLineScopes=${summarizeReadyLineScopes(allReadyAtStart) || '(none)'}.`);
     fallbackReviewRef.current = mode === 'learn-and-review' && dueCount === 0;
@@ -537,6 +587,15 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
         const rehydrated = await rehydrateReadyLine(ready);
         // Consume the cache slot regardless of rehydration outcome — if it's stale,
         // we don't want to keep trying it. The worker will refill an empty slot.
+        // Stash metadata so an "End session" mid-learn can re-put this exact row.
+        lastConsumedReadyLineRef.current = {
+          id: ready.id,
+          qualityDropCp: ready.qualityDropCp,
+          previewSan: ready.previewSan,
+          frontierId: ready.frontierId,
+          frontierFen: ready.frontierFen,
+          createdAt: ready.createdAt,
+        };
         await deleteReadyLine(ready.id);
         await refreshReadyLines();
         setWorkerKick(k => k + 1);
@@ -981,6 +1040,7 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
   }
 
   async function enterReviewPhase(mode: SessionMode) {
+    clearSessionSrsSnapshots();
     const fresh = await getEdgesByMover(repertoire.id, repertoire.color);
     let reviewEdges: Edge[];
     let allRepEdges: Edge[] | null = null;
@@ -1027,17 +1087,61 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
 
     if (plan && plan.segments.length > 0) {
       setReviewPlanError(null);
+      // Pending-partial-line consumption (line-aware only). If the user hit
+      // "End session" mid-segment last time, that segment is queued for
+      // re-delivery here. SRS state has already been rolled back at
+      // end-session time, so the cards are in their pre-attempt state.
+      let finalPlan: ReviewPlan = plan;
+      if (currentScopeKey) {
+        const pending = await getPendingPartialLine(repertoire.id, currentScopeKey);
+        if (pending) {
+          const rehydratedPath: Edge[] = [];
+          let stale = false;
+          for (const id of pending.pathEdgeIds) {
+            const cached = await getEdgeById(id);
+            if (cached) rehydratedPath.push(cached);
+            else { stale = true; break; }
+          }
+          // Always consume the pointer — stale or not — so a broken pending
+          // pointer can't wedge future review sessions.
+          await deletePendingPartialLine(repertoire.id, currentScopeKey);
+          if (!stale && rehydratedPath.length > 0) {
+            const promptIdSet = new Set(pending.promptEdgeIds);
+            const prompts = rehydratedPath
+              .map((edge, idx) => ({ edge, idx }))
+              .filter(({ edge }) => promptIdSet.has(edge.id))
+              .map(({ edge, idx }) => ({ cardEdgeId: edge.id, pathIdx: idx }));
+            const syntheticSegment: ReviewPlan['segments'][number] = {
+              segmentId: `resume::${pending.id}::${Date.now().toString(36)}`,
+              rootFen: pending.segmentRootFen,
+              path: rehydratedPath,
+              prompts,
+            };
+            const contextPlies = syntheticSegment.path.length - syntheticSegment.prompts.length;
+            finalPlan = {
+              ...plan,
+              segments: [syntheticSegment, ...plan.segments],
+              totalPrompts: plan.totalPrompts + syntheticSegment.prompts.length,
+              totalContextPlies: plan.totalContextPlies + contextPlies,
+              trace: [...plan.trace, `resume: prepended pending partial line (${rehydratedPath.length} plies, ${prompts.length} prompts).`],
+            };
+          }
+        }
+      }
       setPhase({
         kind: 'review',
         queue, idx: 0, mode, sub: 'await',
         lastWrongUci: null, sameWrongCount: 0, wrongCount: 0,
-        plan,
+        plan: finalPlan,
         segmentIdx: 0,
         contextPlyIdx: 0,
-        promptIdxInSegment: indexOfFirstPromptAtOrAfter(plan.segments[0], 0),
+        promptIdxInSegment: indexOfFirstPromptAtOrAfter(finalPlan.segments[0], 0),
         gradedPromptEdgeIds: [],
+        failedPromptIdsThisSession: [],
+        wrongPromptIdsThisPass: [],
         segmentRunUnclean: false,
         segmentAttemptNumber: 1,
+        reviewSessionRelearnMinutes: trainingPreferences.relearnMinutes,
       });
       return;
     }
@@ -1053,7 +1157,13 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
       });
       setReviewPlanError(reportBody);
     }
-    setPhase({ kind: 'review', queue, idx: 0, mode, sub: 'await', lastWrongUci: null, sameWrongCount: 0, wrongCount: 0 });
+    setPhase({
+      kind: 'review',
+      queue, idx: 0, mode, sub: 'await',
+      lastWrongUci: null, sameWrongCount: 0, wrongCount: 0,
+      failedPromptIdsThisSession: [],
+      reviewSessionRelearnMinutes: trainingPreferences.relearnMinutes,
+    });
   }
 
   function buildReviewPlanFailureReport(opts: {
@@ -1142,7 +1252,8 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
 
     // Test phase grades on the FIRST wrong attempt at this edge.
     if (p.kind === 'test' && !p.gradedEdges.has(edge.id)) {
-      const updated = gradeFail(edge);
+      void snapshotEdgeOnce(edge);
+      const updated = gradeFail(edge, { relearnMinutes: trainingPreferences.relearnMinutes });
       const newGraded = new Set(p.gradedEdges);
       newGraded.add(edge.id);
       setPhase({
@@ -1170,18 +1281,48 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
     if (cur.kind === 'review' && cur.plan && cur.sub === 'await' && isAtPromptNowInSegmentedReview(cur)) {
       const promptEdge = currentSegmentedPromptEdge(cur);
       if (!promptEdge) return;
-      const gradedIds = cur.gradedPromptEdgeIds ?? [];
-      const alreadyGraded = gradedIds.includes(promptEdge.id);
+      const passedIds = cur.gradedPromptEdgeIds ?? [];
+      const failedSessionIds = cur.failedPromptIdsThisSession ?? [];
+      const wrongPassIds = cur.wrongPromptIdsThisPass ?? [];
+      const alreadyFailedThisSession = failedSessionIds.includes(promptEdge.id);
+      // Hint counts as a wrong on this pass and as a fail-grade. Compounding
+      // ease/lapse drop only on the first fail per card per session.
+      void persistSegmentedReviewGrade(promptEdge, 'fail', { skipCompound: alreadyFailedThisSession });
       setPhase({
         ...cur,
         wrongCount: Math.max(cur.wrongCount, HINT_AFTER_WRONG_COUNT),
         segmentRunUnclean: true,
-        gradedPromptEdgeIds: alreadyGraded ? gradedIds : [...gradedIds, promptEdge.id],
+        gradedPromptEdgeIds: passedIds.filter(id => id !== promptEdge.id),
+        failedPromptIdsThisSession: alreadyFailedThisSession ? failedSessionIds : [...failedSessionIds, promptEdge.id],
+        wrongPromptIdsThisPass: wrongPassIds.includes(promptEdge.id) ? wrongPassIds : [...wrongPassIds, promptEdge.id],
       });
-      if (!alreadyGraded) {
-        void persistSegmentedReviewGrade(promptEdge, 'fail');
-      }
       return;
+    }
+
+    // Legacy flat review: hint counts as a wrong attempt — grade fail (with
+    // per-session compounding guard) so the card returns at +relearnMinutes
+    // even if the user goes on to play the right move next. Matches the
+    // segmented review behavior above. See docs/srs.md.
+    const flatCur = phaseRef.current;
+    if (flatCur.kind === 'review' && !flatCur.plan && flatCur.sub === 'await') {
+      const card = flatCur.queue[flatCur.idx];
+      if (card) {
+        const failedSessionIds = flatCur.failedPromptIdsThisSession ?? [];
+        const alreadyFailedThisSession = failedSessionIds.includes(card.id);
+        const relearnMinutes = flatCur.reviewSessionRelearnMinutes ?? trainingPreferences.relearnMinutes;
+        void snapshotEdgeOnce(card);
+        const updated = gradeFail(card, { relearnMinutes, skipCompound: alreadyFailedThisSession });
+        void putEdge(updated);
+        if (!alreadyFailedThisSession) {
+          setStats(s => ({ ...s, reviewFailed: s.reviewFailed + 1 }));
+        }
+        setPhase({
+          ...flatCur,
+          wrongCount: Math.max(flatCur.wrongCount, HINT_AFTER_WRONG_COUNT),
+          failedPromptIdsThisSession: alreadyFailedThisSession ? failedSessionIds : [...failedSessionIds, card.id],
+        });
+        return;
+      }
     }
 
     setPhase(p => {
@@ -1387,6 +1528,12 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
       setRebuildingFrontiers(false);
     }
     setStats(s => ({ ...s, learnPassed: s.learnPassed + learnedEdges.length, linesLearned: s.linesLearned + 1 }));
+    // The learn line is fully graded and persisted. Snapshots from the test
+    // attempt (mid-test fails) are no longer needed; downstream review entry
+    // will also clear, but clear here so a non-review-followup keeps the ref
+    // tidy.
+    clearSessionSrsSnapshots();
+    lastConsumedReadyLineRef.current = null;
     finishLine(p.mode);
   }
 
@@ -1403,22 +1550,38 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
     if (result.uci === card.uci) {
       setPhase({ ...p, sub: 'good-flash', lastWrongUci: null, sameWrongCount: 0 });
       if (p.wrongCount === 0) {
+        void snapshotEdgeOnce(card);
         const updated = gradePass(card);
         void putEdge(updated);
         setStats(s => ({ ...s, reviewPassed: s.reviewPassed + 1 }));
       }
       return true;
     }
-    // Wrong. Apply gradeFail on first wrong only.
+    // Wrong. Apply gradeFail on first wrong only. Per-session guard: if this
+    // card has already been graded fail elsewhere in this session, refresh dueAt
+    // via skipCompound (no ease/lapse compounding). See docs/srs.md.
     const sameAsLast = p.lastWrongUci === result.uci;
     const newSameCount = sameAsLast ? p.sameWrongCount + 1 : 1;
     const newWrongCount = p.wrongCount + 1;
+    const failedSessionIds = p.failedPromptIdsThisSession ?? [];
+    const alreadyFailedThisSession = failedSessionIds.includes(card.id);
+    const relearnMinutes = p.reviewSessionRelearnMinutes ?? trainingPreferences.relearnMinutes;
     if (newSameCount === 1) {
-      const updated = gradeFail(card);
+      void snapshotEdgeOnce(card);
+      const updated = gradeFail(card, { relearnMinutes, skipCompound: alreadyFailedThisSession });
       void putEdge(updated);
-      setStats(s => ({ ...s, reviewFailed: s.reviewFailed + 1 }));
+      if (!alreadyFailedThisSession) {
+        setStats(s => ({ ...s, reviewFailed: s.reviewFailed + 1 }));
+      }
     }
-    setPhase({ ...p, sub: 'bad-flash', lastWrongUci: result.uci, sameWrongCount: newSameCount, wrongCount: newWrongCount });
+    setPhase({
+      ...p,
+      sub: 'bad-flash',
+      lastWrongUci: result.uci,
+      sameWrongCount: newSameCount,
+      wrongCount: newWrongCount,
+      failedPromptIdsThisSession: alreadyFailedThisSession ? failedSessionIds : [...failedSessionIds, card.id],
+    });
     if (newSameCount >= OVERRIDE_AFTER_SAME_WRONG_COUNT) {
       // Override prompt for review too.
       setTimeout(() => triggerReviewOverride(card, result.uci), BAD_FLASH_MS + 50);
@@ -1490,15 +1653,27 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
     return p.plan.segments[p.segmentIdx]?.path[p.contextPlyIdx] ?? null;
   }
 
-  async function persistSegmentedReviewGrade(edge: Edge, grade: 'pass' | 'fail') {
+  async function persistSegmentedReviewGrade(
+    edge: Edge,
+    grade: 'pass' | 'fail',
+    options: { skipCompound?: boolean } = {},
+  ) {
     const latest = await getEdge(repertoire.id, edge.parentFen, edge.childFen);
+    await snapshotEdgeOnce(latest ?? edge);
+    const phase = phaseRef.current;
+    const relearnMinutes = phase.kind === 'review'
+      ? phase.reviewSessionRelearnMinutes ?? trainingPreferences.relearnMinutes
+      : trainingPreferences.relearnMinutes;
     const updated = grade === 'pass'
       ? gradePass(latest ?? edge)
-      : gradeFail(latest ?? edge);
+      : gradeFail(latest ?? edge, { relearnMinutes, skipCompound: options.skipCompound });
     void putEdge(updated);
-    setStats(s => grade === 'pass'
-      ? ({ ...s, reviewPassed: s.reviewPassed + 1 })
-      : ({ ...s, reviewFailed: s.reviewFailed + 1 }));
+    // Stats: count compounding fails once; skipCompound refreshes don't add to the fail counter.
+    setStats(s => {
+      if (grade === 'pass') return { ...s, reviewPassed: s.reviewPassed + 1 };
+      if (options.skipCompound) return s;
+      return { ...s, reviewFailed: s.reviewFailed + 1 };
+    });
   }
 
   function advanceSegmentedReviewContext() {
@@ -1525,6 +1700,15 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
 
   function jumpToNextSegment(p: Extract<Phase, { kind: 'review' }>): Phase {
     if (!p.plan) return p;
+    // The current segment has been passed cleanly — those edges' graded SRS
+    // state should persist past End-session. Drop their snapshots so a later
+    // rollback can't undo them.
+    if (p.segmentIdx !== undefined) {
+      const completedSeg = p.plan.segments[p.segmentIdx];
+      if (completedSeg) {
+        for (const e of completedSeg.path) sessionSrsSnapshotsRef.current.delete(e.id);
+      }
+    }
     const nextSegIdx = (p.segmentIdx ?? 0) + 1;
     if (nextSegIdx >= p.plan.segments.length) return { kind: 'done', mode: p.mode };
     const nextSeg = p.plan.segments[nextSegIdx];
@@ -1537,27 +1721,46 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
       lastWrongUci: null,
       sameWrongCount: 0,
       wrongCount: 0,
+      wrongPromptIdsThisPass: [],
       segmentRunUnclean: false,
       segmentAttemptNumber: 1,
+      // failedPromptIdsThisSession and gradedPromptEdgeIds carry over — they're session-scoped.
     };
   }
 
-  // (restartReviewSegment removed 2026-05: the segmented review no longer loops
-  // back to redo a segment on imperfect passes. completeOrRepeatReviewSegment
-  // always advances. The `segmentRunUnclean` field is still written by the
-  // wrong/hint/skip handlers but is no longer read for control flow; left in
-  // place so a future feature can resurface "you had X misses on this pass" UI
-  // without re-plumbing.)
+  // Restart the CURRENT segment for another pass. Used by completeOrRepeatReviewSegment
+  // when the pass had any wrong moves (wrongPromptIdsThisPass non-empty). Resets
+  // pass-scoped state (cursor, wrong tracking) and bumps segmentAttemptNumber.
+  // Preserves session-scoped state (failedPromptIdsThisSession, gradedPromptEdgeIds).
+  // See docs/review-flow.md "When does a segment end?".
+  function restartReviewSegment(p: Extract<Phase, { kind: 'review' }>): Phase {
+    if (!p.plan || p.segmentIdx === undefined) return p;
+    const seg = p.plan.segments[p.segmentIdx];
+    if (!seg) return p;
+    return {
+      ...p,
+      contextPlyIdx: 0,
+      promptIdxInSegment: indexOfFirstPromptAtOrAfterPly(seg, 0),
+      sub: 'await',
+      lastWrongUci: null,
+      sameWrongCount: 0,
+      wrongCount: 0,
+      wrongPromptIdsThisPass: [],
+      segmentRunUnclean: false,
+      segmentAttemptNumber: (p.segmentAttemptNumber ?? 1) + 1,
+    };
+  }
 
   function completeOrRepeatReviewSegment(p: Extract<Phase, { kind: 'review' }>): Phase {
     if (!p.plan) return p;
-    // After a single pass-through, advance to the next segment regardless of
-    // whether the pass had mistakes. Missed prompts already had gradeFail fire
-    // (dueAt = endOfTodayISO), so they'll resurface tomorrow via SRS. An older
-    // version of this function looped back to `restartReviewSegment(p)` when
-    // `p.segmentRunUnclean` was true, which trapped users in a "same line over
-    // and over" loop on any imperfect pass. The repeat-until-clean behavior was
-    // undocumented and surprising; removed 2026-05.
+    // A segment advances only after one full pass-through with no wrong moves on
+    // any prompt (Chessable-style drilling). If this pass had any wrongs, restart
+    // the segment for another pass. Missed cards keep their +relearnMinutes dueAt
+    // (Anki-style relearning) and will resurface in a later same-day session.
+    // See docs/review-flow.md.
+    if ((p.wrongPromptIdsThisPass?.length ?? 0) > 0) {
+      return restartReviewSegment(p);
+    }
     return jumpToNextSegment(p);
   }
 
@@ -1596,16 +1799,22 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
     if (!promptEdge) return false;
     const result = applyMove(promptEdge.parentFen, move);
     if (!result) return false;
+    const passedIds = p.gradedPromptEdgeIds ?? [];
+    const failedSessionIds = p.failedPromptIdsThisSession ?? [];
+    const wrongPassIds = p.wrongPromptIdsThisPass ?? [];
     if (result.uci === promptEdge.uci) {
-      const gradedIds = p.gradedPromptEdgeIds ?? [];
-      const alreadyGraded = gradedIds.includes(promptEdge.id);
-      const shouldGradePass = p.wrongCount === 0 && !alreadyGraded;
+      // Right. gradePass fires only if this card has never been graded fail in
+      // THIS session (right-after-wrong stays as fail) AND has not already been
+      // graded pass this session. See docs/srs.md "Multi-grade within one session".
+      const alreadyFailed = failedSessionIds.includes(promptEdge.id);
+      const alreadyPassed = passedIds.includes(promptEdge.id);
+      const shouldGradePass = !alreadyFailed && !alreadyPassed && p.wrongCount === 0;
       setPhase({
         ...p,
         sub: 'good-flash',
         lastWrongUci: null,
         sameWrongCount: 0,
-        gradedPromptEdgeIds: shouldGradePass ? [...gradedIds, promptEdge.id] : gradedIds,
+        gradedPromptEdgeIds: shouldGradePass ? [...passedIds, promptEdge.id] : passedIds,
       });
       if (shouldGradePass) {
         // Fetch the latest edge state from DB before grading — the plan was
@@ -1618,12 +1827,17 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
     const sameAsLast = p.lastWrongUci === result.uci;
     const newSameCount = sameAsLast ? p.sameWrongCount + 1 : 1;
     const newWrongCount = p.wrongCount + 1;
-    const gradedIds = p.gradedPromptEdgeIds ?? [];
-    const alreadyGraded = gradedIds.includes(promptEdge.id);
-    const shouldGradeFail = !alreadyGraded;
-    if (shouldGradeFail) {
-      void persistSegmentedReviewGrade(promptEdge, 'fail');
-    }
+    const alreadyFailedThisSession = failedSessionIds.includes(promptEdge.id);
+    // First fail of this card this session → full gradeFail (ease −0.2, lapses+1, dueAt = +relearnMinutes).
+    // Subsequent fails same session → refresh dueAt only via skipCompound (no ease/lapse compounding).
+    void persistSegmentedReviewGrade(promptEdge, 'fail', { skipCompound: alreadyFailedThisSession });
+    const nextFailedIds = alreadyFailedThisSession ? failedSessionIds : [...failedSessionIds, promptEdge.id];
+    const nextWrongPassIds = wrongPassIds.includes(promptEdge.id) ? wrongPassIds : [...wrongPassIds, promptEdge.id];
+    // A card that was previously passed this session is being failed now; remove
+    // from the passed set so a later right move can be considered for re-grading…
+    // …actually no: per spec, once failed this session it stays failed (right-after-wrong
+    // does NOT promote). The passedIds entry is harmless to keep but cleaner to drop.
+    const nextPassedIds = passedIds.filter(id => id !== promptEdge.id);
     setPhase({
       ...p,
       sub: 'bad-flash',
@@ -1631,7 +1845,9 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
       sameWrongCount: newSameCount,
       wrongCount: newWrongCount,
       segmentRunUnclean: true,
-      gradedPromptEdgeIds: shouldGradeFail ? [...gradedIds, promptEdge.id] : gradedIds,
+      gradedPromptEdgeIds: nextPassedIds,
+      failedPromptIdsThisSession: nextFailedIds,
+      wrongPromptIdsThisPass: nextWrongPassIds,
     });
     if (newSameCount >= OVERRIDE_AFTER_SAME_WRONG_COUNT) {
       setTimeout(() => triggerReviewOverride(promptEdge, result.uci), BAD_FLASH_MS + 50);
@@ -1644,10 +1860,12 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
     if (p.kind !== 'review' || !p.plan) return;
     if (!isAtPromptNowInSegmentedReview(p)) return;
     const promptEdge = currentSegmentedPromptEdge(p);
-    const gradedIds = p.gradedPromptEdgeIds ?? [];
-    const alreadyGraded = !!promptEdge && gradedIds.includes(promptEdge.id);
-    if (promptEdge && !alreadyGraded) {
-      void persistSegmentedReviewGrade(promptEdge, 'fail');
+    const passedIds = p.gradedPromptEdgeIds ?? [];
+    const failedSessionIds = p.failedPromptIdsThisSession ?? [];
+    const wrongPassIds = p.wrongPromptIdsThisPass ?? [];
+    const alreadyFailedThisSession = !!promptEdge && failedSessionIds.includes(promptEdge.id);
+    if (promptEdge) {
+      void persistSegmentedReviewGrade(promptEdge, 'fail', { skipCompound: alreadyFailedThisSession });
     }
     setStats(s => ({ ...s, reviewSkipped: s.reviewSkipped + 1 }));
     setPhase({
@@ -1657,8 +1875,122 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
       sameWrongCount: 0,
       wrongCount: 0,
       segmentRunUnclean: true,
-      gradedPromptEdgeIds: promptEdge && !alreadyGraded ? [...gradedIds, promptEdge.id] : gradedIds,
+      gradedPromptEdgeIds: promptEdge ? passedIds.filter(id => id !== promptEdge.id) : passedIds,
+      failedPromptIdsThisSession: promptEdge && !alreadyFailedThisSession
+        ? [...failedSessionIds, promptEdge.id]
+        : failedSessionIds,
+      wrongPromptIdsThisPass: promptEdge && !wrongPassIds.includes(promptEdge.id)
+        ? [...wrongPassIds, promptEdge.id]
+        : wrongPassIds,
     });
+  }
+
+  // ---------- End-session handling ----------
+
+  // Re-put the ready line so the user gets the same line back next "Learn" click.
+  async function preserveLearnReadyLine(line: GeneratedLine): Promise<void> {
+    if (!currentScopeKey) return;
+    const stash = lastConsumedReadyLineRef.current;
+    const startFen = line.fullPath[line.generationStartIndex - 1]?.childFen ?? repertoire.rootFen;
+    const endFen = line.fullPath[line.fullPath.length - 1]?.childFen ?? startFen;
+    const ready: ReadyLine = {
+      id: stash?.id ?? readyLineId(repertoire.id, currentScopeKey),
+      repertoireId: repertoire.id,
+      scopeKey: currentScopeKey,
+      fullPathEdgeIds: line.fullPath.map(e => e.id),
+      newEdgeIds: line.newEdges.map(e => e.id),
+      generationStartIndex: line.generationStartIndex,
+      frontierId: line.frontierId ?? stash?.frontierId,
+      frontierFen: line.frontierFen ?? stash?.frontierFen,
+      startFen,
+      endFen,
+      qualityDropCp: stash?.qualityDropCp ?? null,
+      previewSan: stash?.previewSan ?? renderSanFromEdges(line.fullPath),
+      createdAt: stash?.createdAt ?? new Date().toISOString(),
+    };
+    await putReadyLine(ready);
+    await refreshReadyLines();
+  }
+
+  function shouldPersistPendingPartial(p: Extract<Phase, { kind: 'review' }>): boolean {
+    if (!p.plan || p.segmentIdx === undefined) return false;
+    const ctx = p.contextPlyIdx ?? 0;
+    const promptIdx = p.promptIdxInSegment ?? 0;
+    // True iff the user has actually started the current segment (advanced past
+    // ply 0 or answered/skipped at least one prompt).
+    return ctx > 0 || promptIdx > 0;
+  }
+
+  async function persistPendingPartialLineFromPhase(p: Extract<Phase, { kind: 'review' }>): Promise<void> {
+    if (!currentScopeKey || !p.plan || p.segmentIdx === undefined) return;
+    const seg = p.plan.segments[p.segmentIdx];
+    if (!seg) return;
+    const promptIdSet = new Set(seg.prompts.map(prompt => seg.path[prompt.pathIdx]?.id).filter((id): id is string => !!id));
+    const pending: PendingPartialLine = {
+      id: `${repertoire.id}::${currentScopeKey}`,
+      repertoireId: repertoire.id,
+      scopeKey: currentScopeKey,
+      segmentRootFen: seg.rootFen,
+      pathEdgeIds: seg.path.map(e => e.id),
+      promptEdgeIds: [...promptIdSet],
+      originalSegmentIdx: p.segmentIdx,
+      contextPlyIdxAtEnd: p.contextPlyIdx ?? 0,
+      createdAt: new Date().toISOString(),
+    };
+    await putPendingPartialLine(pending);
+  }
+
+  function pickEndSessionConfirmMessage(p: Phase): string {
+    if (p.kind === 'walkthrough' || p.kind === 'test') {
+      return 'End this learn session? Any SRS changes from this attempt will be discarded and the same line will be offered next time you click Learn.';
+    }
+    if (p.kind === 'review' && p.plan) {
+      return 'End this review session? Lines you completed stay graded. The line you were in the middle of will be reset and offered first next time (in line-aware review).';
+    }
+    if (p.kind === 'review') {
+      return 'End this review session? Cards you have already reviewed stay graded; cards you have not reached are untouched.';
+    }
+    return 'End this session?';
+  }
+
+  async function endSessionWithRollback(): Promise<void> {
+    const p = phaseRef.current;
+    try {
+      if (p.kind === 'walkthrough' || p.kind === 'test') {
+        await preserveLearnReadyLine(p.line);
+        await rollbackAllSessionSrs();
+      } else if (p.kind === 'review' && p.plan && p.segmentIdx !== undefined) {
+        if (shouldPersistPendingPartial(p)) {
+          await persistPendingPartialLineFromPhase(p);
+          const seg = p.plan.segments[p.segmentIdx];
+          if (seg) {
+            await rollbackSessionSrsForEdges(new Set(seg.path.map(e => e.id)));
+          }
+        }
+        clearSessionSrsSnapshots();
+      } else if (p.kind === 'review') {
+        // Flat (non-line-aware) review: spec says keep all graded cards as-is,
+        // no rollback, no pending pointer.
+        clearSessionSrsSnapshots();
+      }
+    } finally {
+      lastConsumedReadyLineRef.current = null;
+      // Reload edges so the UI reflects the rollback (or lack thereof) and bump
+      // the worker so a freshly re-put ready line gets noticed if relevant.
+      await reload();
+      onDataChange();
+      setWorkerKick(k => k + 1);
+      // The End-session button is only rendered while in walkthrough/test/review,
+      // all of which carry a `mode`. Defensive fallback for type narrowing.
+      const mode: SessionMode = 'mode' in p ? p.mode : 'review-only';
+      setPhase({ kind: 'done', mode });
+    }
+  }
+
+  function handleEndSessionRequest(): void {
+    const p = phaseRef.current;
+    if (!window.confirm(pickEndSessionConfirmMessage(p))) return;
+    void endSessionWithRollback();
   }
 
   // ---------- Render ----------
@@ -2114,7 +2446,7 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
             />
             <div className="training-board-actions">
               <button onClick={revealCurrentHint} disabled={!canHint}>Hint</button>
-              <button className="danger" onClick={() => setPhase({ kind: 'done', mode: phase.mode })}>End session</button>
+              <button className="danger" onClick={handleEndSessionRequest}>End session</button>
             </div>
           </div>
           <ProgressPills states={pillStates} />
@@ -2201,9 +2533,10 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
     const flashClass = phase.sub === 'good-flash' ? 'board-flash-good' : phase.sub === 'bad-flash' ? 'board-flash-bad' : undefined;
     const lastMoveEdge = plyIdx > 0 ? seg.path[plyIdx - 1] ?? null : null;
     const lastMoveHighlightsForReview = lastMoveEdge ? lastMoveHighlights(lastMoveEdge) : undefined;
-    const arrows = atPrompt && promptEdge && phase.sub === 'await' && phase.wrongCount >= HINT_AFTER_WRONG_COUNT
-      ? [{ startSquare: promptEdge.uci.slice(0, 2), endSquare: promptEdge.uci.slice(2, 4), color: 'rgba(212,173,105,0.95)' }]
-      : [];
+    const showHint = atPrompt && promptEdge && phase.sub === 'await' && phase.wrongCount >= HINT_AFTER_WRONG_COUNT;
+    const boardHighlights = showHint && promptEdge
+      ? { ...(lastMoveHighlightsForReview ?? {}), ...hintFromSquareHighlight(promptEdge) }
+      : lastMoveHighlightsForReview;
     const sanLineSoFar = renderSanFromEdges(seg.path.slice(0, plyIdx));
     const segmentLabel = describeSegmentLabel(seg);
     const promptsRemaining = atPrompt
@@ -2229,8 +2562,8 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
               }}
               allowMoves={atPrompt && phase.sub === 'await'}
               allowedDragColor={repertoire.color}
-              arrows={arrows}
-              highlights={lastMoveHighlightsForReview}
+              arrows={[]}
+              highlights={boardHighlights}
               flashClass={flashClass}
               size={boardSize}
               resizable
@@ -2238,7 +2571,7 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
             />
             <div className="training-board-actions">
               <button onClick={revealCurrentHint} disabled={!atPrompt || phase.sub !== 'await'}>Hint</button>
-              <button className="danger" onClick={() => setPhase({ kind: 'done', mode: phase.mode })}>End session</button>
+              <button className="danger" onClick={handleEndSessionRequest}>End session</button>
             </div>
           </div>
           <div className="row" style={{ marginTop: 10 }}>
@@ -2295,6 +2628,10 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
     const boardFen = phase.sub === 'good-flash' ? card.childFen : card.parentFen;
     const flashClass = phase.sub === 'good-flash' ? 'board-flash-good' : phase.sub === 'bad-flash' ? 'board-flash-bad' : undefined;
     const lastMoveHighlightsForReview = phase.sub === 'good-flash' ? lastMoveHighlights(card) : undefined;
+    const showFlatHint = phase.sub === 'await' && phase.wrongCount >= HINT_AFTER_WRONG_COUNT;
+    const flatBoardHighlights = showFlatHint
+      ? { ...(lastMoveHighlightsForReview ?? {}), ...hintFromSquareHighlight(card) }
+      : lastMoveHighlightsForReview;
     return (
       <div className="layout training-layout">
         <div>
@@ -2312,10 +2649,8 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
               }}
               allowMoves={phase.sub === 'await'}
               allowedDragColor={repertoire.color}
-              arrows={phase.sub === 'await' && phase.wrongCount >= HINT_AFTER_WRONG_COUNT
-                ? [{ startSquare: card.uci.slice(0, 2), endSquare: card.uci.slice(2, 4), color: 'rgba(212,173,105,0.95)' }]
-                : []}
-              highlights={lastMoveHighlightsForReview}
+              arrows={[]}
+              highlights={flatBoardHighlights}
               flashClass={flashClass}
               size={boardSize}
               resizable
@@ -2323,7 +2658,7 @@ export function TrainMode({ repertoire, openingKey, onOpeningChange, onDataChang
             />
             <div className="training-board-actions">
               <button onClick={revealCurrentHint} disabled={phase.sub !== 'await'}>Hint</button>
-              <button className="danger" onClick={() => setPhase({ kind: 'done', mode: phase.mode })}>End session</button>
+              <button className="danger" onClick={handleEndSessionRequest}>End session</button>
             </div>
           </div>
           <div className="row" style={{ marginTop: 10 }}>
@@ -2636,7 +2971,7 @@ function formatRelativeFromNow(iso: string, now = Date.now()): string {
 function SrsCardPanel({ edge }: { edge: Edge }) {
   const now = useMemo(() => new Date(), [edge.id, edge.dueAt, edge.lastReviewedAt]);
   const passPreview = useMemo(() => gradePass(edge, now), [edge, now]);
-  const failPreview = useMemo(() => gradeFail(edge, now), [edge, now]);
+  const failPreview = useMemo(() => gradeFail(edge, { now }), [edge, now]);
   const dueNow = isDue(edge, now);
   return (
     <div className="panel srs-card-panel">
@@ -2702,7 +3037,10 @@ function buildReviewSessionReport(
     lines.push(`contextPlyIdx: ${phase.contextPlyIdx ?? 0}`);
     lines.push(`promptIdxInSegment: ${phase.promptIdxInSegment ?? 0}`);
     lines.push(`sub: ${phase.sub} · wrongCount: ${phase.wrongCount} · sameWrongCount: ${phase.sameWrongCount}`);
-    lines.push(`Graded so far this session (${(phase.gradedPromptEdgeIds ?? []).length} edges): ${(phase.gradedPromptEdgeIds ?? []).join(', ') || '(none)'}`);
+    lines.push(`segmentAttempt: ${phase.segmentAttemptNumber ?? 1}`);
+    lines.push(`Passed this session (${(phase.gradedPromptEdgeIds ?? []).length}): ${(phase.gradedPromptEdgeIds ?? []).join(', ') || '(none)'}`);
+    lines.push(`Failed this session (${(phase.failedPromptIdsThisSession ?? []).length}): ${(phase.failedPromptIdsThisSession ?? []).join(', ') || '(none)'}`);
+    lines.push(`Wrong this pass (${(phase.wrongPromptIdsThisPass ?? []).length}): ${(phase.wrongPromptIdsThisPass ?? []).join(', ') || '(none)'}`);
     lines.push('');
     lines.push('--- Segments ---');
     plan.segments.forEach((seg, idx) => {
@@ -3030,6 +3368,13 @@ function lastMoveHighlights(edge: Edge): Record<string, string> {
     [edge.uci.slice(0, 2)]: 'rgba(245, 211, 90, 0.18)',
     [edge.uci.slice(2, 4)]: 'rgba(245, 211, 90, 0.28)',
   };
+}
+
+// Hint highlight for review: tint the from-square of the stored move only
+// (not the to-square — that would essentially give away the move). Merged
+// with lastMoveHighlights so the previous move's highlight is preserved.
+function hintFromSquareHighlight(edge: Edge): Record<string, string> {
+  return { [edge.uci.slice(0, 2)]: 'rgba(212, 173, 105, 0.55)' };
 }
 
 function countBranches(rootFen: string, edges: Edge[]): number {

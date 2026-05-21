@@ -21,7 +21,9 @@ import {
   useBoardPreferences,
 } from '../lib/boardPreferences';
 import {
+  MAX_RELEARN_MINUTES,
   MAX_REVIEW_LINE_PLAYBACK_DELAY_MS,
+  MIN_RELEARN_MINUTES,
   MIN_REVIEW_LINE_PLAYBACK_DELAY_MS,
   useTrainingPreferences,
 } from '../lib/trainingPreferences';
@@ -374,6 +376,29 @@ export function SettingsMode({ onTriviaProgressChange, onOpenGlobalAlgorithm, on
                 </div>
               </div>
               <span className="mono small">{trainingPreferences.reviewLinePlaybackDelayMs}ms</span>
+            </div>
+          </div>
+
+          <div className="panel training-preferences-panel">
+            <h3>SRS system settings</h3>
+            <div className="settings-copy muted small">
+              Tune the spaced-repetition scheduler. Defaults match Anki conventions; change only if you know what you want.
+            </div>
+            <div className="training-preference-row">
+              <label htmlFor="relearn-minutes">
+                <strong>Relearn interval</strong>
+                <span className="muted small">When you miss a card, how long until it can come back in a later session today.</span>
+              </label>
+              <input
+                id="relearn-minutes"
+                type="number"
+                min={MIN_RELEARN_MINUTES}
+                max={MAX_RELEARN_MINUTES}
+                step={1}
+                value={trainingPreferences.relearnMinutes}
+                onChange={e => void updateTrainingPreferences({ relearnMinutes: Number(e.target.value) })}
+              />
+              <span className="mono small">min</span>
             </div>
           </div>
 

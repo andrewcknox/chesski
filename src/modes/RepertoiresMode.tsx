@@ -71,35 +71,15 @@ export function RepertoiresMode({
     }
   }
 
-  const standard = repertoires.filter(rep => (rep.projectKind ?? 'standard') !== 'siloed');
-  const siloed = repertoires.filter(rep => rep.projectKind === 'siloed');
-
   return (
     <div className="layout rep-manager-layout">
       <div className="panel">
         <h3>Repertoires</h3>
         <div className="muted small settings-copy">
-          Openings live inside a repertoire. Side repertoires are for plans that intentionally disagree from the same position.
+          Openings live inside repertoires. Separate repertoires are extra projects that can intentionally disagree from the same position.
         </div>
-        <ProjectGroup
-          title="main repertoires"
-          reps={standard}
-          activeRepId={activeRepId}
-          counts={counts}
-          editingId={editingId}
-          draftName={draftName}
-          setDraftName={setDraftName}
-          onSelect={onSelect}
-          onOpen={onOpen}
-          onRename={startRename}
-          onSaveRename={saveRename}
-          onSetKind={setKind}
-          onClone={clone}
-          onDelete={onDelete}
-        />
-        <ProjectGroup
-          title="side repertoires"
-          reps={siloed}
+        <RepertoireList
+          reps={repertoires}
           activeRepId={activeRepId}
           counts={counts}
           editingId={editingId}
@@ -127,8 +107,7 @@ export function RepertoiresMode({
   );
 }
 
-function ProjectGroup({
-  title,
+function RepertoireList({
   reps,
   activeRepId,
   counts,
@@ -143,7 +122,6 @@ function ProjectGroup({
   onClone,
   onDelete,
 }: {
-  title: string;
   reps: Repertoire[];
   activeRepId: string | null;
   counts: Record<string, number>;
@@ -160,7 +138,6 @@ function ProjectGroup({
 }) {
   return (
     <div className="rep-group">
-      <h4>{title}</h4>
       {reps.length === 0 ? (
         <div className="settings-empty-drop">Nothing here yet</div>
       ) : reps.map(rep => {
@@ -179,7 +156,7 @@ function ProjectGroup({
                 <button className="rep-title-button" onClick={() => onSelect(rep.id)}>{rep.name}</button>
               )}
               <div className="muted small">
-                {rep.color === 'w' ? 'White' : 'Black'} - {counts[rep.id] ?? 0} moves - {(rep.projectKind ?? 'standard') === 'siloed' ? 'separate' : 'main'}
+                {rep.color === 'w' ? 'White' : 'Black'} - {counts[rep.id] ?? 0} moves - {(rep.projectKind ?? 'standard') === 'siloed' ? 'separate' : 'standard'}
               </div>
             </div>
             <div className="rep-card-actions">
@@ -190,10 +167,10 @@ function ProjectGroup({
               )}
               <button className="primary" onClick={() => onOpen(rep.id)}>Open</button>
               <button onClick={() => onSetKind(rep, (rep.projectKind ?? 'standard') === 'siloed' ? 'standard' : 'siloed')}>
-                {(rep.projectKind ?? 'standard') === 'siloed' ? 'Move to main repertoire' : 'Make side repertoire'}
+                {(rep.projectKind ?? 'standard') === 'siloed' ? 'Mark standard' : 'Mark separate'}
               </button>
               <button onClick={() => onClone(rep)}>Clone</button>
-              <button className="danger" onClick={() => onDelete(rep.id)}>Delete</button>
+              <button className="danger" onClick={() => onDelete(rep.id)}>Delete repertoire</button>
             </div>
           </div>
         );

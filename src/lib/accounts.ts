@@ -1,8 +1,8 @@
 import { getLichessToken, setLichessToken } from './lichess';
-import { ensureDefaultMainRepertoires, exportAll, getMeta, importAll, listRepertoires, migrateToFenRoots, removeScaffoldContamination, setMeta, type ExportData } from './storage';
+import { consolidateLegacyOpeningRepertoires, ensureDefaultMainRepertoires, exportAll, getMeta, importAll, listRepertoires, migrateToStartingRoots, removeScaffoldContamination, setMeta, type ExportData } from './storage';
 import { getHistoryProgress, saveHistoryProgress, type ProgressByCard } from './historySrs';
 import { loadPersistentVault, savePersistentVault, type PersistentVault } from './localVault';
-import { markFirstRunOnboardingPending } from './onboarding';
+import { getFirstRunOnboardingState, markFirstRunOnboardingPending, setFirstRunOnboardingState, type FirstRunOnboardingState } from './onboarding';
 
 const META_ACCOUNTS = 'local_accounts_v1';
 const META_CURRENT_ACCOUNT = 'current_account_v1';
@@ -13,6 +13,7 @@ export interface AccountSnapshot {
   data: ExportData;
   lichessToken: string | null;
   historyProgress: ProgressByCard;
+  onboardingState?: FirstRunOnboardingState;
 }
 
 export interface LocalAccount {
@@ -197,8 +198,12 @@ export async function createAccount(username: string, password: string): Promise
   if (accounts.some(a => normalizeUsername(a.username) === clean)) throw new Error('That username already exists on this computer.');
   const now = new Date().toISOString();
   const salt = randomHex(16);
+  const currentToken = await getLichessToken();
   await saveRecoverySnapshot('Before account creation');
+  await clearLiveStudyData();
+  await setLichessToken(currentToken);
   await ensureDefaultMainRepertoires();
+  await markFirstRunOnboardingPending();
   const snapshot = await currentAccountSnapshot(now);
   const account: LocalAccount = {
     id: `acct_${Date.now().toString(36)}_${randomHex(4)}`,
@@ -213,7 +218,6 @@ export async function createAccount(username: string, password: string): Promise
   };
   await setAccounts([...accounts, account]);
   await setCurrentAccountId(account.id);
-  await markFirstRunOnboardingPending();
   return accountSummary(account);
 }
 
@@ -247,7 +251,9 @@ export async function signIn(username: string, password: string): Promise<Accoun
     await importAll(updated.snapshot.data, 'replace');
     await setLichessToken(updated.snapshot.lichessToken ?? fallbackToken);
     await saveHistoryProgress(updated.snapshot.historyProgress);
-    await migrateToFenRoots();
+    await setFirstRunOnboardingState(updated.snapshot.onboardingState ?? 'done');
+    await migrateToStartingRoots();
+    await consolidateLegacyOpeningRepertoires();
     await cleanAllRepertoireContamination();
   } else if (fallbackToken) {
     await setLichessToken(fallbackToken);
@@ -268,6 +274,11 @@ async function clearLiveAccountData(): Promise<void> {
   await saveHistoryProgress({});
 }
 
+async function clearLiveStudyData(): Promise<void> {
+  await importAll({ version: 3, exportedAt: new Date().toISOString(), repertoires: [], nodes: [], edges: [], frontiers: [] }, 'replace');
+  await saveHistoryProgress({});
+}
+
 // Remove contamination edges from all curated opening repertoires.
 // Safe to call repeatedly — fast no-op when there is nothing to clean.
 async function cleanAllRepertoireContamination(): Promise<void> {
@@ -278,7 +289,8 @@ async function cleanAllRepertoireContamination(): Promise<void> {
 }
 
 export async function runStartupMigrations(): Promise<void> {
-  await migrateToFenRoots();
+  await migrateToStartingRoots();
+  await consolidateLegacyOpeningRepertoires();
   await cleanAllRepertoireContamination();
 }
 
@@ -294,6 +306,7 @@ export async function syncCurrentAccount(): Promise<AccountSummary> {
     data: await exportAll(),
     lichessToken: await getLichessToken(),
     historyProgress: await getHistoryProgress(),
+    onboardingState: await getFirstRunOnboardingState(),
   };
   const updated = { ...accounts[idx], snapshot, lastSyncedAt: now, updatedAt: now };
   accounts[idx] = updated;
@@ -309,7 +322,9 @@ export async function restoreCurrentAccount(): Promise<AccountSummary> {
   await importAll(account.snapshot.data, 'replace');
   await setLichessToken(account.snapshot.lichessToken);
   await saveHistoryProgress(account.snapshot.historyProgress);
-  await migrateToFenRoots();
+  await setFirstRunOnboardingState(account.snapshot.onboardingState ?? 'done');
+  await migrateToStartingRoots();
+  await consolidateLegacyOpeningRepertoires();
   return accountSummary(account);
 }
 
@@ -354,7 +369,9 @@ export async function restoreRecoverySnapshot(id: string): Promise<void> {
   await importAll(snapshot.data, 'replace');
   await setLichessToken(snapshot.lichessToken);
   await saveHistoryProgress(snapshot.historyProgress);
-  await migrateToFenRoots();
+  await setFirstRunOnboardingState(snapshot.onboardingState ?? 'done');
+  await migrateToStartingRoots();
+  await consolidateLegacyOpeningRepertoires();
 }
 
 async function saveRecoverySnapshot(reason: string): Promise<void> {
@@ -370,6 +387,7 @@ async function saveRecoverySnapshot(reason: string): Promise<void> {
     data,
     lichessToken: await getLichessToken(),
     historyProgress,
+    onboardingState: await getFirstRunOnboardingState(),
   };
   const existing = await getRecoverySnapshots();
   await setRecoverySnapshots([snapshot, ...existing].slice(0, 8));
@@ -381,5 +399,6 @@ async function currentAccountSnapshot(now: string): Promise<AccountSnapshot> {
     data: await exportAll(),
     lichessToken: await getLichessToken(),
     historyProgress: await getHistoryProgress(),
+    onboardingState: await getFirstRunOnboardingState(),
   };
 }

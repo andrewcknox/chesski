@@ -201,3 +201,74 @@ Two related capabilities the settings surface should expose:
   balanced and produce no change in behaviour.
 
 ---
+
+## Leech detection and the "Leeches" folder
+
+**Status:** Not started. **Priority: medium** — depends on the segment-loop
+review work landing first (which it has, 2026-05-21). Surfaced when the user
+asked for a way to handle cards they keep getting wrong without manual
+intervention.
+
+### Why this matters
+
+Some cards keep failing across sessions. Right now the SRS algorithm just
+keeps shortening the interval (ease drops to the 1.3 floor, then `round(d *
+1.3)` grows the interval slowly). The user has no way to see which cards are
+the persistent problem children — and no UI to decide "actually, the
+repertoire move here is wrong for me; pick a different one."
+
+### What we want
+
+- **Detection.** After each review session, for every edge that was in the
+  session's `failedPromptIdsThisSession`: increment a per-edge
+  `consecutiveFailedSessions` counter (new field on `Edge`, default 0). For
+  every edge that was passed cleanly this session (in `gradedPromptEdgeIds`
+  with no later fail): reset the counter to 0. When the counter hits 5,
+  mark the edge as a leech.
+
+- **Surface.** Add an inconspicuous "Leeches" folder to the Repertoire tab.
+  It lists every edge currently flagged as a leech, grouped by opening.
+  Click into one to see the position, the stored move, and two buttons:
+  **Keep** and **Change**.
+
+- **Keep.** Clears the leech flag and resets `consecutiveFailedSessions` to
+  0. The card resumes normal SRS scheduling. No move change.
+
+- **Change.** Runs the user's per-opening algorithm (player-book → masters
+  → lichess-2000 → engine, per `recommendationSettings`) using the existing
+  `pickYourMove` machinery to recommend the **next-best alternative move at
+  this position**. Critically the recommender must EXCLUDE the current
+  stored move so it picks something different. User confirms; the edge gets
+  swapped via `swapMoveInRepertoire` (same mechanism the override flow
+  uses), the leech flag clears, and `consecutiveFailedSessions` resets.
+
+### Open questions
+
+- Where does `consecutiveFailedSessions` live? On the `Edge` itself or in a
+  separate `leechState` store? Adding a field to `Edge` is simpler but
+  every edge then carries it; a separate store keeps `Edge` lean.
+- Threshold tunable per user (Settings → SRS system settings)? Default 5.
+- What about scaffolding edges (opponent moves)? They're never graded so
+  they can never become leeches — confirm `consecutiveFailedSessions`
+  stays at 0 for them.
+- Does session-end leech increment count when a card was failed THEN passed
+  in the same session? Per the same-session-grade rules, "passed after
+  fail" still ends in fail state, so yes — increment.
+
+### Done criteria
+
+- New `consecutiveFailedSessions` field present on every edge with sensible
+  default + migration path.
+- Increment/reset logic runs at session end (somewhere in
+  `enterReviewPhase`'s tear-down or a dedicated `finishReviewSession`
+  function).
+- Leech threshold const lives next to other tuning constants in TrainMode
+  or in `trainingPreferences`.
+- "Leeches" folder appears in the Repertoire tab when at least one leech
+  exists; hidden otherwise.
+- Per-card Keep / Change buttons functional; Change uses `pickYourMove`
+  with the current stored move excluded.
+- `npm test` clean; new unit tests for the increment/reset logic and the
+  "exclude stored move" recommender variant.
+
+---

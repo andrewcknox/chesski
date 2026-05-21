@@ -122,6 +122,27 @@ export interface ReadyLine {
   createdAt: string;
 }
 
+// Pointer to a single review-segment the user was midway through when they hit
+// "End session". SRS damage to its cards has already been rolled back; this
+// record only tells the next line-aware review session to re-offer that exact
+// segment first. Keyed by (repertoireId, scopeKey) so each scope holds at most
+// one pending segment. Ignored by flat (non-line-aware) review.
+export interface PendingPartialLine {
+  id: string;
+  repertoireId: string;
+  scopeKey: string;
+  segmentRootFen: NormFen;
+  pathEdgeIds: string[];
+  promptEdgeIds: string[];
+  originalSegmentIdx: number;
+  contextPlyIdxAtEnd: number;
+  createdAt: string;
+}
+
+export function pendingPartialLineId(repertoireId: string, scopeKey: string): string {
+  return `${repertoireId}::${scopeKey}`;
+}
+
 export function edgeId(repertoireId: string, parentFen: NormFen, childFen: NormFen): string {
   return `${repertoireId}::${parentFen}::${childFen}`;
 }

@@ -5,6 +5,7 @@ import {
   addMovesToRepertoire,
   createRepertoire,
   CURATED_OPENINGS,
+  getEdgesForRepertoire,
   getRepertoire,
   markCuratedOpeningScaffolds,
 } from '../lib/storage';
@@ -13,6 +14,8 @@ import {
   importMemoryKeyForOpening,
   type ImportMemoryEntry,
 } from '../lib/importMemory';
+import { findOpeningPathInRepertoire } from '../lib/openingFolders';
+import { prepareOpeningLineForRepertoire } from '../lib/openingRoots';
 import type { CuratedOpening, OpeningLine } from '../lib/openings';
 import type { Color, NormFen, Repertoire } from '../types';
 
@@ -52,58 +55,80 @@ export function NewOpeningMode({
   onChanged,
   onOpen,
   startOnly = false,
+  scopedRepertoireId = null,
+  onBack,
+  onStartPrepMap,
 }: {
   repertoires: Repertoire[];
   activeRepId: string | null;
   onCreated: (rep: Repertoire) => void | Promise<void>;
   onChanged: () => void | Promise<void>;
-  onOpen: (id: string) => void;
+  onOpen: (id: string, openingKey?: string | null) => void;
   startOnly?: boolean;
+  scopedRepertoireId?: string | null;
+  onBack?: () => void;
+  onStartPrepMap?: (repId: string, openingKey: string) => void;
 }) {
+  const scopedRepertoire = scopedRepertoireId ? repertoires.find(rep => rep.id === scopedRepertoireId) ?? null : null;
+  const scopedAdd = !!scopedRepertoire;
   const openings = useMemo<CatalogPreview[]>(() => CURATED_OPENINGS.map(opening => ({
     opening,
     ...openingPreview(opening),
   })), []);
   const [catalogColor, setCatalogColor] = useState<Color>(() => {
-    const active = repertoires.find(rep => rep.id === activeRepId);
+    const active = scopedRepertoire ?? repertoires.find(rep => rep.id === activeRepId);
     return active?.color ?? 'w';
   });
   const visibleOpenings = useMemo(() => openings.filter(item => item.opening.color === catalogColor), [catalogColor, openings]);
   const [selectedKey, setSelectedKey] = useState(visibleOpenings[0]?.opening.key ?? '');
-  const selected = selectedKey === CUSTOM_OPENING_KEY
-    ? null
-    : visibleOpenings.find(item => item.opening.key === selectedKey) ?? visibleOpenings[0] ?? null;
   const [historyByKey, setHistoryByKey] = useState<Record<string, ImportMemoryEntry | null>>({});
-  const [mode, setMode] = useState<FlowMode>(startOnly || repertoires.length === 0 ? 'new' : 'add');
-  const [targetId, setTargetId] = useState(activeRepId ?? repertoires[0]?.id ?? '');
+  const [mode, setMode] = useState<FlowMode>(scopedAdd ? 'add' : startOnly || repertoires.length === 0 ? 'new' : 'add');
+  const [targetId, setTargetId] = useState(scopedRepertoireId ?? activeRepId ?? repertoires[0]?.id ?? '');
   const [name, setName] = useState('');
   const [customName, setCustomName] = useState('Build Your Own');
   const [customColor, setCustomColor] = useState<Color>('w');
   const [customMoves, setCustomMoves] = useState('');
-  const [projectKind, setProjectKind] = useState<Repertoire['projectKind']>('standard');
+  const [projectKind, setProjectKind] = useState<Repertoire['projectKind']>(startOnly ? 'standard' : 'siloed');
   const [prepFlow, setPrepFlow] = useState<PrepFlow | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [addedOpeningKeys, setAddedOpeningKeys] = useState<Record<string, true>>({});
 
   const compatibleTargets = useMemo(() => {
-    if (selectedKey === CUSTOM_OPENING_KEY) return repertoires.filter(rep => rep.color === customColor);
-    if (!selected) return repertoires;
-    return repertoires.filter(rep => rep.color === selected.opening.color);
-  }, [customColor, repertoires, selected, selectedKey]);
+    if (scopedRepertoire) return [scopedRepertoire];
+    const targetColor = selectedKey === CUSTOM_OPENING_KEY ? customColor : catalogColor;
+    return repertoires.filter(rep => rep.color === targetColor);
+  }, [catalogColor, customColor, repertoires, scopedRepertoire, selectedKey]);
+  const displayedOpenings = useMemo(() => {
+    if (mode !== 'add' || !targetId) return visibleOpenings;
+    return visibleOpenings.filter(item => !addedOpeningKeys[item.opening.key]);
+  }, [addedOpeningKeys, mode, targetId, visibleOpenings]);
+  const selected = selectedKey === CUSTOM_OPENING_KEY
+    ? null
+    : displayedOpenings.find(item => item.opening.key === selectedKey) ?? displayedOpenings[0] ?? null;
   const selectedHistory = selected ? historyByKey[importMemoryKeyForOpening(selected.opening)] ?? null : null;
 
   useEffect(() => {
+    if (scopedRepertoire) {
+      setCatalogColor(scopedRepertoire.color);
+      setMode('add');
+      setTargetId(scopedRepertoire.id);
+      if (selectedKey !== CUSTOM_OPENING_KEY && !displayedOpenings.some(item => item.opening.key === selectedKey)) {
+        setSelectedKey(displayedOpenings[0]?.opening.key ?? '');
+      }
+      return;
+    }
     setCustomColor(catalogColor);
     if (selectedKey === CUSTOM_OPENING_KEY) return;
-    if (visibleOpenings.some(item => item.opening.key === selectedKey)) return;
-    setSelectedKey(visibleOpenings[0]?.opening.key ?? '');
-  }, [catalogColor, selectedKey, visibleOpenings]);
+    if (displayedOpenings.some(item => item.opening.key === selectedKey)) return;
+    setSelectedKey(displayedOpenings[0]?.opening.key ?? CUSTOM_OPENING_KEY);
+  }, [catalogColor, displayedOpenings, scopedRepertoire, selectedKey]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const entries = await Promise.all(visibleOpenings.map(async item => {
+      const entries = await Promise.all(displayedOpenings.map(async item => {
         const key = importMemoryKeyForOpening(item.opening);
         const memory = await getImportMemoryForOpening(item.opening);
         return [key, memory] as const;
@@ -113,7 +138,31 @@ export function NewOpeningMode({
       }
     })();
     return () => { cancelled = true; };
-  }, [visibleOpenings]);
+  }, [displayedOpenings]);
+
+  useEffect(() => {
+    if (mode !== 'add' || !targetId) {
+      setAddedOpeningKeys({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const rep = await getRepertoire(targetId);
+      if (!rep) {
+        if (!cancelled) setAddedOpeningKeys({});
+        return;
+      }
+      const edges = await getEdgesForRepertoire(rep.id);
+      const next: Record<string, true> = {};
+      for (const item of openings.filter(opening => opening.opening.color === rep.color)) {
+        if (findOpeningPathInRepertoire(rep, item.opening, edges)) next[item.opening.key] = true;
+      }
+      if (!cancelled) setAddedOpeningKeys(next);
+    })().catch(err => {
+      if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+    });
+    return () => { cancelled = true; };
+  }, [mode, openings, targetId]);
 
   useEffect(() => {
     if (startOnly || repertoires.length === 0) setMode('new');
@@ -166,7 +215,7 @@ export function NewOpeningMode({
     else await addSelected(lines);
   }
 
-  async function useImportedHistory(action: FlowMode) {
+  async function applyImportedHistory(action: FlowMode) {
     if (!selectedHistory) return;
     if (action === 'new') await createSelected(selectedHistory.lines);
     else await addSelected(selectedHistory.lines);
@@ -182,17 +231,17 @@ export function NewOpeningMode({
         name: name.trim() || selected.opening.name,
         color: selected.opening.color,
         openingKey: selected.opening.key,
-        moves: selected.opening.moves,
-        scaffoldPlyCount: selected.opening.moves.length,
         projectKind,
       });
-      for (const moves of lines.filter(moves => pathKey(moves) !== pathKey(selected.opening.moves))) {
-        await addMovesToRepertoire(rep, moves, { scaffoldPlyCount: selected.opening.moves.length });
+      for (const line of lines) {
+        const prepared = prepareOpeningLineForRepertoire(rep, selected.opening, line);
+        if (prepared.moves.length === 0) continue;
+        await addMovesToRepertoire(rep, prepared.moves, { scaffoldPlyCount: prepared.scaffoldPlyCount });
       }
       await markCuratedOpeningScaffolds(rep);
       setPrepFlow(null);
       await onCreated(rep);
-      onOpen(rep.id);
+      onOpen(rep.id, selected.opening.key);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -210,16 +259,43 @@ export function NewOpeningMode({
       let reusedEdges = 0;
       const rep = await getRepertoire(targetId);
       if (!rep) throw new Error('Could not find that repertoire.');
-      for (const moves of lines) {
-        const result = await addMovesToRepertoire(rep, moves, { scaffoldPlyCount: selected.opening.moves.length });
+      for (const line of lines) {
+        const prepared = prepareOpeningLineForRepertoire(rep, selected.opening, line);
+        if (prepared.moves.length === 0) continue;
+        const result = await addMovesToRepertoire(rep, prepared.moves, { scaffoldPlyCount: prepared.scaffoldPlyCount });
         addedEdges += result.addedEdges;
         reusedEdges += result.reusedEdges;
       }
       await markCuratedOpeningScaffolds(rep);
       setPrepFlow(null);
       await onChanged();
+      setAddedOpeningKeys(current => ({ ...current, [selected.opening.key]: true }));
       setStatus(`${selected.opening.name}: ${addedEdges} new moves, ${reusedEdges} already known.`);
-      onOpen(targetId);
+      onOpen(targetId, selected.opening.key);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addSelectedBaseAndStartPrepMap() {
+    if (!selected || !targetId) return;
+    setBusy(true);
+    setStatus(null);
+    setError(null);
+    try {
+      const rep = await getRepertoire(targetId);
+      if (!rep) throw new Error('Could not find that repertoire.');
+      const prepared = prepareOpeningLineForRepertoire(rep, selected.opening, selected.opening.moves);
+      if (prepared.moves.length > 0) {
+        await addMovesToRepertoire(rep, prepared.moves, { scaffoldPlyCount: prepared.scaffoldPlyCount });
+      }
+      await markCuratedOpeningScaffolds(rep);
+      await onChanged();
+      setAddedOpeningKeys(current => ({ ...current, [selected.opening.key]: true }));
+      setPrepFlow(null);
+      onStartPrepMap?.(targetId, selected.opening.key);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -296,12 +372,12 @@ export function NewOpeningMode({
     void executePrepared(prepFlow.action, prepFlow.selectedMoves);
   }
 
-  if (!selected && selectedKey !== CUSTOM_OPENING_KEY) {
+  if (!selected && selectedKey !== CUSTOM_OPENING_KEY && displayedOpenings.length > 0) {
     return <div className="panel">No curated openings are available yet.</div>;
   }
 
   return (
-    <div className="new-opening-layout">
+    <div className="new-opening-layout focused-subview">
       {prepFlow && (
         <ContinuationModal
           flow={prepFlow}
@@ -317,27 +393,37 @@ export function NewOpeningMode({
       )}
 
       <div className="new-opening-main">
+        {onBack && (
+          <div className="subview-back-row add-opening-back-row">
+            <button onClick={onBack}>Back</button>
+          </div>
+        )}
         <div className="opening-toolbar">
           <div>
-            <h3>New Opening</h3>
-            <div className="muted small">Pick the side you are preparing, then choose a starting point.</div>
+            <div className="eyebrow">{scopedAdd ? 'Add opening' : 'New opening'}</div>
+            <h2>{scopedRepertoire ? scopedRepertoire.name : 'Opening catalog'}</h2>
+            <div className="muted small">
+              {scopedRepertoire
+                ? 'Choose the next opening folder for this repertoire.'
+                : 'Pick the side you are preparing, then choose a starting point.'}
+            </div>
           </div>
           <div className="opening-toolbar-controls">
-            <div className="segmented">
+            {!scopedAdd && <div className="segmented">
               <button className={catalogColor === 'w' ? 'active' : ''} onClick={() => setCatalogColor('w')}>White openings</button>
               <button className={catalogColor === 'b' ? 'active' : ''} onClick={() => setCatalogColor('b')}>Black openings</button>
-            </div>
-            {!startOnly && repertoires.length > 0 && (
+            </div>}
+            {!scopedAdd && !startOnly && repertoires.length > 0 && (
               <div className="segmented">
                 <button className={mode === 'new' ? 'active' : ''} onClick={() => setMode('new')}>New repertoire</button>
-                <button className={mode === 'add' ? 'active' : ''} onClick={() => setMode('add')}>Add to existing</button>
+                <button className={mode === 'add' ? 'active' : ''} onClick={() => setMode('add')}>Add to repertoire</button>
               </div>
             )}
           </div>
         </div>
 
         <div className="opening-catalog">
-          {visibleOpenings.map(item => {
+          {displayedOpenings.map(item => {
             const history = historyByKey[importMemoryKeyForOpening(item.opening)];
             return (
               <button
@@ -357,14 +443,14 @@ export function NewOpeningMode({
                 </div>
                 <div className="opening-card-copy">
                   <strong>{item.opening.name}</strong>
-                  <span>{item.opening.color === 'w' ? 'White' : 'Black'} repertoire</span>
+                  <span>{item.opening.color === 'w' ? 'White' : 'Black'} opening</span>
                   {history && <span className="opening-history-pill">{history.gameCount} imported games</span>}
                   <span className="opening-card-line">{item.moveText}</span>
                 </div>
               </button>
             );
           })}
-          <button
+          {!scopedAdd && <button
             className={'opening-card custom-opening-card' + (selectedKey === CUSTOM_OPENING_KEY ? ' selected' : '')}
             onClick={() => setSelectedKey(CUSTOM_OPENING_KEY)}
           >
@@ -374,7 +460,12 @@ export function NewOpeningMode({
               <span>Manual line builder</span>
               <span className="opening-card-line">Paste or type your own moves</span>
             </div>
-          </button>
+          </button>}
+          {displayedOpenings.length === 0 && (
+            <div className="settings-empty-drop add-opening-empty empty-state">
+              Every {catalogColor === 'w' ? 'White' : 'Black'} opening in the catalog has already been added to this repertoire.
+            </div>
+          )}
         </div>
       </div>
 
@@ -423,7 +514,7 @@ export function NewOpeningMode({
                   Chesski found {selectedHistory.gameCount} of your games in this opening and saved {selectedHistory.lines.length} line{selectedHistory.lines.length === 1 ? '' : 's'} from that import.
                 </div>
                 <div className="row opening-history-actions">
-                  <button className="primary" onClick={() => void useImportedHistory(mode)} disabled={busy || (mode === 'add' && !targetId)}>
+                  <button className="primary" onClick={() => void applyImportedHistory(mode)} disabled={busy || (mode === 'add' && !targetId)}>
                     {busy ? 'Adding...' : 'Use my history'}
                   </button>
                   <span className="muted small">Or continue below with Chesski's normal algorithm.</span>
@@ -441,8 +532,8 @@ export function NewOpeningMode({
                 onChange={e => setProjectKind(e.target.checked ? 'siloed' : 'standard')}
               />
               <span>
-                Side repertoire
-                <span className="muted small"> can contradict your main repertoire</span>
+                Separate repertoire
+                <span className="muted small"> can contradict another repertoire</span>
               </span>
             </label>
             <button className="primary" onClick={() => startPreparation('new')} disabled={busy}>
@@ -453,12 +544,17 @@ export function NewOpeningMode({
           <div className="opening-action-form">
             {compatibleTargets.length > 0 ? (
               <>
-                <select value={targetId} onChange={e => setTargetId(e.target.value)}>
-                  {compatibleTargets.map(rep => (
-                    <option key={rep.id} value={rep.id}>{rep.name} ({rep.color === 'w' ? 'White' : 'Black'})</option>
-                  ))}
-                </select>
-                <button className="primary" onClick={() => startPreparation('add')} disabled={busy || !targetId}>
+                {!scopedAdd && (
+                  <>
+                    <label className="small muted" htmlFor="opening-target-repertoire">Add to repertoire</label>
+                    <select id="opening-target-repertoire" value={targetId} onChange={e => setTargetId(e.target.value)}>
+                      {compatibleTargets.map(rep => (
+                        <option key={rep.id} value={rep.id}>{rep.name} ({rep.color === 'w' ? 'White' : 'Black'})</option>
+                      ))}
+                    </select>
+                  </>
+                )}
+                <button className="primary" onClick={() => scopedAdd ? void addSelectedBaseAndStartPrepMap() : startPreparation('add')} disabled={busy || !targetId}>
                   {busy ? 'Adding...' : "Use Chesski's algorithm"}
                 </button>
               </>
@@ -545,8 +641,8 @@ function CustomOpeningPanel({
                 onChange={e => onProjectKindChange(e.target.checked ? 'siloed' : 'standard')}
               />
               <span>
-                Side repertoire
-                <span className="muted small"> can contradict your main repertoire</span>
+                Separate repertoire
+                <span className="muted small"> can contradict another repertoire</span>
               </span>
             </label>
             <button className="primary" onClick={onCreate} disabled={busy || !customMoves.trim()}>
@@ -555,7 +651,8 @@ function CustomOpeningPanel({
           </>
         ) : compatibleTargets.length > 0 ? (
           <>
-            <select value={targetId} onChange={e => onTargetChange(e.target.value)}>
+            <label className="small muted" htmlFor="custom-opening-target-repertoire">Add to repertoire</label>
+            <select id="custom-opening-target-repertoire" value={targetId} onChange={e => onTargetChange(e.target.value)}>
               {compatibleTargets.map(rep => (
                 <option key={rep.id} value={rep.id}>{rep.name} ({rep.color === 'w' ? 'White' : 'Black'})</option>
               ))}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import {
   createAccount,
   deleteCurrentAccount,
@@ -20,9 +20,13 @@ import { TokenModal } from '../components/TokenModal';
 export interface AccountModeProps {
   onRestored: () => void;
   onTokenChanged: () => void;
+  onBackup: () => void | Promise<void>;
+  onRestore: () => void;
+  onRestartOnboarding: () => void | Promise<void>;
+  restoreInput: ReactNode;
 }
 
-export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
+export function AccountMode({ onRestored, onTokenChanged, onBackup, onRestore, onRestartOnboarding, restoreInput }: AccountModeProps) {
   const [current, setCurrent] = useState<AccountSummary | null>(null);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [recoveries, setRecoveries] = useState<RecoverySummary[]>([]);
@@ -145,6 +149,14 @@ export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
           onCancel={() => setShowTokenManage(false)}
         />
       )}
+      <div className="page-header account-page-header">
+        <div>
+          <div className="eyebrow">Account</div>
+          <h1>Vault and data</h1>
+          <p>Keep the practical stuff clear: sign-in, backup, restore, and local rescue snapshots.</p>
+        </div>
+      </div>
+
       <div className="panel">
         <h3>Account</h3>
         <div className="muted small settings-copy">
@@ -220,7 +232,7 @@ export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
         <h3>Saved on this computer</h3>
         <div className="account-list">
           {accounts.length === 0 ? (
-            <div className="muted">No local accounts yet.</div>
+            <div className="settings-empty-drop empty-state">No local accounts yet.</div>
           ) : accounts.map(account => (
             <div key={account.id} className="account-list-row">
               <span>{account.username}</span>
@@ -257,10 +269,30 @@ export function AccountMode({ onRestored, onTokenChanged }: AccountModeProps) {
       </div>
 
       <div className="panel">
+        <h3>Data</h3>
+        <div className="muted small settings-copy">
+          Back up or restore the local Chesski data for this account and browser profile.
+        </div>
+        <div className="row account-actions">
+          <button onClick={() => void onBackup()} disabled={busy}>Backup</button>
+          <button onClick={onRestore} disabled={busy}>Restore</button>
+          {restoreInput}
+        </div>
+      </div>
+
+      <div className="panel">
+        <h3>Onboarding</h3>
+        <div className="muted small settings-copy">
+          Start the first-run guide again without changing your saved repertoire data.
+        </div>
+        <button onClick={() => void onRestartOnboarding()} disabled={busy}>Restart onboarding</button>
+      </div>
+
+      <div className="panel">
         <h3>Rescue snapshots</h3>
         <div className="account-list">
           {recoveries.length === 0 ? (
-            <div className="muted">No rescue snapshots yet.</div>
+            <div className="settings-empty-drop empty-state">No rescue snapshots yet.</div>
           ) : recoveries.map(snapshot => (
             <div key={snapshot.id} className="account-list-row">
               <span>{snapshot.repertoireCount} reps · {snapshot.moveCount} moves</span>

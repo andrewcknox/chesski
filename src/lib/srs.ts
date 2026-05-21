@@ -43,15 +43,38 @@ export function gradeLearnPass(edge: Edge, now = new Date()): Edge {
   };
 }
 
-// SM-2 fail: drop ease, reset reps, requeue today.
-export function gradeFail(edge: Edge, now = new Date()): Edge {
+export const DEFAULT_RELEARN_MINUTES = 5;
+
+export interface GradeFailOptions {
+  /** Minutes from now before the failed card becomes due again. Default DEFAULT_RELEARN_MINUTES. */
+  relearnMinutes?: number;
+  /** Override "now" for tests / previews. */
+  now?: Date;
+  /** Skip the ease drop and lapses bump. Used by the same-session re-fail guard:
+   *  if a card has already been failed earlier in this session, subsequent fails
+   *  refresh dueAt only — see docs/srs.md "Multi-grade within one session". */
+  skipCompound?: boolean;
+}
+
+// SM-2 fail: drop ease, reset reps, requeue +relearnMinutes from now.
+export function gradeFail(edge: Edge, options: GradeFailOptions = {}): Edge {
+  const now = options.now ?? new Date();
+  const relearnMinutes = options.relearnMinutes ?? DEFAULT_RELEARN_MINUTES;
+  const dueAt = new Date(now.getTime() + relearnMinutes * 60_000).toISOString();
+  if (options.skipCompound) {
+    return {
+      ...edge,
+      dueAt,
+      lastReviewedAt: now.toISOString(),
+    };
+  }
   return {
     ...edge,
     ease: Math.max(1.3, edge.ease - 0.2),
     reps: 0,
     lapses: edge.lapses + 1,
     intervalDays: 0,
-    dueAt: endOfTodayISO(now),
+    dueAt,
     lastReviewedAt: now.toISOString(),
   };
 }

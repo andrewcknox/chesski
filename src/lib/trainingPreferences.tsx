@@ -7,6 +7,7 @@ export interface TrainingPreferences {
   reviewSessionLength: number;
   useLineAwareReview: boolean;
   reviewLinePlaybackDelayMs: number;
+  relearnMinutes: number;
 }
 
 export const DEFAULT_TRAINING_PREFERENCES: TrainingPreferences = {
@@ -14,10 +15,13 @@ export const DEFAULT_TRAINING_PREFERENCES: TrainingPreferences = {
   reviewSessionLength: 10,
   useLineAwareReview: true,
   reviewLinePlaybackDelayMs: 80,
+  relearnMinutes: 5,
 };
 
 export const MIN_REVIEW_LINE_PLAYBACK_DELAY_MS = 40;
 export const MAX_REVIEW_LINE_PLAYBACK_DELAY_MS = 600;
+export const MIN_RELEARN_MINUTES = 1;
+export const MAX_RELEARN_MINUTES = 60;
 
 const META_TRAINING_PREFERENCES = 'training_preferences_v1';
 
@@ -75,6 +79,12 @@ function normalizeTrainingPreferences(saved?: Partial<TrainingPreferences>): Tra
       MIN_REVIEW_LINE_PLAYBACK_DELAY_MS,
       MAX_REVIEW_LINE_PLAYBACK_DELAY_MS,
       DEFAULT_TRAINING_PREFERENCES.reviewLinePlaybackDelayMs,
+    ),
+    relearnMinutes: clampInteger(
+      saved?.relearnMinutes,
+      MIN_RELEARN_MINUTES,
+      MAX_RELEARN_MINUTES,
+      DEFAULT_TRAINING_PREFERENCES.relearnMinutes,
     ),
   };
 }

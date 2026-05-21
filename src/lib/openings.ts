@@ -675,7 +675,7 @@ const BASE_CURATED_OPENINGS: CuratedOpening[] = [
     key: 'benoni-b',
     name: 'Benoni Defense',
     color: 'b',
-    moves: ['d4', 'Nf6', 'c4', 'c5', 'd5', 'e6'],
+    moves: ['d4', 'Nf6', 'c4', 'c5'],
     continuations: [
       {
         key: 'modern-benoni-b',
